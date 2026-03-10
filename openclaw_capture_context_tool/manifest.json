@@ -1,0 +1,16 @@
+{
+  "bundle_name": "openclaw_capture_toolkit_bundle",
+  "generated_at": "2026-03-10T06:23:10Z",
+  "build_source": "local",
+  "purpose": "single-session capture for OpenClaw conversation analysis",
+  "files": [
+    "openclaw_capture_toolkit.sh",
+    "env.example",
+    "README.md",
+    "操作手册.md",
+    "export_session_capture_html.py",
+    "capture_tool/tools/context_capture/*",
+    "capture_tool/tools/context_capture/web/*",
+    "requirements.txt"
+  ]
+}

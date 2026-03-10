@@ -1,0 +1,6 @@
+.state/
+.env
+dist/
+output/
+*.swp
+__pycache__/
