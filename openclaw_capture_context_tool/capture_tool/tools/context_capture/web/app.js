@@ -813,10 +813,10 @@ function renderAssembleCard(assembleEntries) {
   sumPanel.className = "lcm-assemble-summary";
   const summaryKvs = [
     ["tokenBudget", fmt(budget)],
-    ["\u8f93\u5165 tokens", fmt(inputTok) + " (\u6570\u5b8c\u6574\u6d88\u606f JSON)"],
-    ["\u7ec4\u88c5\u540e tokens", fmt(outputTok) + " (\u6570 content JSON\uff0c\u5360\u9884\u7b97 " + budgetPct + "%)"],
+    ["\u8f93\u5165 tokens", fmt(outputTok > 0 ? outputTok : inputTok)],
+    ["\u7ec4\u88c5\u540e tokens", fmt(outputTok) + " (\u5360\u9884\u7b97 " + budgetPct + "%)"],
   ];
-  if (saved > 0) summaryKvs.push(["\u8282\u7701", fmt(saved) + " tokens (-" + savePct + "%)"]);
+  if (saved > 0 && sumCount > 0) summaryKvs.push(["\u8282\u7701", fmt(saved) + " tokens (-" + savePct + "%)"]);
   summaryKvs.push(["\u6d88\u606f\u7ec4\u6210", rawCount + " \u539f\u6587 + " + sumCount + " \u6458\u8981"]);
   for (const [k, v] of summaryKvs) {
     const row = document.createElement("div");
@@ -825,17 +825,10 @@ function renderAssembleCard(assembleEntries) {
     const rv = document.createElement("span"); rv.className = "lcm-kv-value" + (k.includes("\u8282\u7701") ? " lcm-saving" : ""); rv.textContent = v;
     row.appendChild(rl); row.appendChild(rv); sumPanel.appendChild(row);
   }
-  const jsonOverhead = inputTok - outputTok;
-  const noteLines = [
-    "\u2139 token \u8ba1\u6570\u8bf4\u660e\uff08\u5168\u90e8\u4e3a \u5b57\u7b26\u6570/4 \u7c97\u4f30\uff09\uff1a",
-    "  \u00b7 \u8f93\u5165 " + fmt(inputTok) + " = \u6d88\u606f\u5185\u5bb9 " + fmt(outputTok) + " + JSON \u7ed3\u6784\u5f00\u9500 " + fmt(jsonOverhead),
-    "  \u00b7 \u7ec4\u88c5\u540e " + fmt(outputTok) + " = \u6570 content JSON (\u5982 [{\"type\":\"text\",\"text\":\"...\"}])",
-    "  \u00b7 \u6d88\u606f\u5217\u8868 tok = \u6570\u7eaf\u6587\u672c\uff0c\u4e0d\u542b JSON \u5305\u88c5\uff0c\u6240\u4ee5\u504f\u5c0f",
-  ];
   const note = document.createElement("div");
   note.className = "lcm-assemble-note";
-  note.textContent = noteLines.join("\n");
   note.style.whiteSpace = "pre-wrap";
+  note.textContent = "\u2139 tokens \u4e3a engine \u5b58\u50a8\u7684 content \u8ba1\u6570\uff08Math.ceil(content.length/4)\uff09\uff0c\u6d88\u606f\u5217\u8868\u4e2d\u7684 tok \u4e3a\u7eaf\u6587\u672c\u7c97\u4f30\uff0c\u53ef\u80fd\u504f\u5c0f";
   sumPanel.appendChild(note);
   body.appendChild(sumPanel);
 
