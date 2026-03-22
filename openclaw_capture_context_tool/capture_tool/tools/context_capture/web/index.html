@@ -37,8 +37,15 @@
         border: 1px solid var(--line); background: var(--card); color: var(--ink);
         border-radius: 8px; cursor: pointer; font: inherit; padding: 7px 14px;
       }
+      .toolbar button:disabled {
+        cursor: wait; opacity: 0.65;
+      }
       .toolbar button:hover { background: #f0f4ff; }
       .toolbar button.is-active { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .toolbar button.button-danger {
+        border-color: #f3c6c6; color: #b42318; background: #fff7f7;
+      }
+      .toolbar button.button-danger:hover { background: #ffeaea; }
       .round-separator {
         display: flex; align-items: center; gap: 10px;
         padding: 6px 0; color: #b0bcc8; font-size: 12px; user-select: none;
@@ -289,6 +296,7 @@
       <header class="toolbar">
         <h1>OpenClaw 会话抓包分析</h1>
         <div class="toolbar-right">
+          <button id="clear-capture-button" class="button-danger" type="button">清理抓包</button>
           <button id="show-all-button" type="button">全量视图</button>
           <button id="refresh-button" type="button">刷新</button>
           <span id="last-refresh-time">未刷新</span>

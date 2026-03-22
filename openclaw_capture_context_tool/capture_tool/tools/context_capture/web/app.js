@@ -1188,6 +1188,12 @@ async function fetchJson(url) {
   return r.json();
 }
 
+async function postJson(url) {
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+
 function selectedTimelineItem() {
   return state.visibleTimeline.find(i => String(i.trace_id) === String(state.selectedTraceId)) || null;
 }
@@ -1405,6 +1411,30 @@ async function loadTimelineAndSelect() {
   }
 }
 
+async function clearCaptureData() {
+  const clearBtn = getElement("clear-capture-button");
+  const confirmed = window.confirm("确认清理当前抓包数据吗？这会清空 raw.jsonl、cache-trace.jsonl 和 gateway.log.jsonl。");
+  if (!confirmed) return;
+
+  if (clearBtn) clearBtn.disabled = true;
+  try {
+    await postJson("/api/clear-capture");
+    state.traceCache = {};
+    state.selectedTraceId = null;
+    state.selectedTrace = null;
+    state.showAllMode = false;
+    state.allTraces = [];
+    const showBtn = getElement("show-all-button");
+    if (showBtn) showBtn.classList.remove("is-active");
+    await loadTimelineAndSelect();
+    setText("last-refresh-time", `已清理: ${new Date().toLocaleTimeString()}`);
+  } catch (_) {
+    setHidden("error-state", false);
+  } finally {
+    if (clearBtn) clearBtn.disabled = false;
+  }
+}
+
 async function showAllTraces() {
   state.showAllMode = true;
     state.selectedTraceId = null;
@@ -1476,6 +1506,9 @@ async function exitShowAll() {
 
 const refreshBtn = getElement("refresh-button");
 if (refreshBtn) refreshBtn.addEventListener("click", () => void loadTimelineAndSelect());
+
+const clearBtn = getElement("clear-capture-button");
+if (clearBtn) clearBtn.addEventListener("click", () => void clearCaptureData());
 
 const showAllBtn = getElement("show-all-button");
 if (showAllBtn) {

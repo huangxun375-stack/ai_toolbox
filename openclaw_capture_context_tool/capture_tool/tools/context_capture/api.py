@@ -206,6 +206,29 @@ def _load_traces(data_dir: Path) -> list[dict[str, Any]]:
     return correlate_events(events)
 
 
+def _capture_file_paths(data_dir: Path) -> list[Path]:
+    paths = [
+        data_dir / "raw.jsonl",
+        data_dir / "cache-trace.jsonl",
+        data_dir / "gateway.log.jsonl",
+    ]
+    extra_cache_trace_file = os.environ.get("CONTEXT_CAPTURE_CACHE_TRACE_FILE", "").strip()
+    if extra_cache_trace_file:
+        extra_path = Path(extra_cache_trace_file)
+        if extra_path not in paths:
+            paths.append(extra_path)
+    return paths
+
+
+def _clear_capture_files(data_dir: Path) -> list[str]:
+    cleared: list[str] = []
+    for path in _capture_file_paths(data_dir):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+        cleared.append(str(path))
+    return cleared
+
+
 def _redact_payload(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
@@ -874,6 +897,11 @@ def create_app(*, data_dir: Path) -> FastAPI:
             result = [e for e in result if isinstance(e.get("ts"), (int, float)) and e["ts"] > after_ts]
 
         return result
+
+    @app.post("/api/clear-capture")
+    def clear_capture() -> dict[str, Any]:
+        cleared = _clear_capture_files(data_dir)
+        return {"ok": True, "cleared_files": cleared}
 
     @app.get("/")
     def get_web_root() -> FileResponse:
