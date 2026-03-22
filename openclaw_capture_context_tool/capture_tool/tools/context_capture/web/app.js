@@ -813,8 +813,8 @@ function renderAssembleCard(assembleEntries) {
   sumPanel.className = "lcm-assemble-summary";
   const summaryKvs = [
     ["tokenBudget", fmt(budget)],
-    ["\u8f93\u5165 tokens", fmt(inputTok) + " (\u542b\u6d88\u606f\u7ed3\u6784\u6807\u8bb0)"],
-    ["\u7ec4\u88c5\u540e tokens", fmt(outputTok) + " (\u5360\u9884\u7b97 " + budgetPct + "%)"],
+    ["\u8f93\u5165 tokens", fmt(inputTok) + " (\u6570\u5b8c\u6574\u6d88\u606f JSON)"],
+    ["\u7ec4\u88c5\u540e tokens", fmt(outputTok) + " (\u6570 content JSON\uff0c\u5360\u9884\u7b97 " + budgetPct + "%)"],
   ];
   if (saved > 0) summaryKvs.push(["\u8282\u7701", fmt(saved) + " tokens (-" + savePct + "%)"]);
   summaryKvs.push(["\u6d88\u606f\u7ec4\u6210", rawCount + " \u539f\u6587 + " + sumCount + " \u6458\u8981"]);
@@ -825,12 +825,12 @@ function renderAssembleCard(assembleEntries) {
     const rv = document.createElement("span"); rv.className = "lcm-kv-value" + (k.includes("\u8282\u7701") ? " lcm-saving" : ""); rv.textContent = v;
     row.appendChild(rl); row.appendChild(rv); sumPanel.appendChild(row);
   }
-  const framingTok = inputTok - outputTok;
+  const jsonOverhead = inputTok - outputTok;
   const noteLines = [
-    "\u2139 token \u8ba1\u6570\u5dee\u5f02\u8bf4\u660e\uff1a",
-    "  \u00b7 \u8f93\u5165 " + fmt(inputTok) + " = \u6d88\u606f\u5185\u5bb9 " + fmt(outputTok) + " + \u5bf9\u8bdd\u683c\u5f0f\u6807\u8bb0 " + fmt(framingTok) + "\uff08\u5982 [user]\u3001[assistant] \u7b49\u89d2\u8272\u6807\u7b7e\uff09",
-    "  \u00b7 \u7ec4\u88c5\u540e " + fmt(outputTok) + " = \u5b9e\u9645\u53d1\u9001\u7ed9\u6a21\u578b\u7684\u5185\u5bb9 token",
-    "  \u00b7 \u6d88\u606f\u5217\u8868\u4e2d\u7684 tok \u4e3a\u7c97\u4f30\u503c\uff0c\u4e0e\u4e0a\u8ff0\u6570\u503c\u53ef\u80fd\u6709\u5dee\u5f02",
+    "\u2139 token \u8ba1\u6570\u8bf4\u660e\uff08\u5168\u90e8\u4e3a \u5b57\u7b26\u6570/4 \u7c97\u4f30\uff09\uff1a",
+    "  \u00b7 \u8f93\u5165 " + fmt(inputTok) + " = \u6d88\u606f\u5185\u5bb9 " + fmt(outputTok) + " + JSON \u7ed3\u6784\u5f00\u9500 " + fmt(jsonOverhead),
+    "  \u00b7 \u7ec4\u88c5\u540e " + fmt(outputTok) + " = \u6570 content JSON (\u5982 [{\"type\":\"text\",\"text\":\"...\"}])",
+    "  \u00b7 \u6d88\u606f\u5217\u8868 tok = \u6570\u7eaf\u6587\u672c\uff0c\u4e0d\u542b JSON \u5305\u88c5\uff0c\u6240\u4ee5\u504f\u5c0f",
   ];
   const note = document.createElement("div");
   note.className = "lcm-assemble-note";
@@ -882,7 +882,7 @@ function renderAssembleCard(assembleEntries) {
     const kvs = [
       ["\u539f\u59cb\u6d88\u606f", rc], ["\u6458\u8981\u6761\u6570", sc],
       ["\u4fdd\u62a4\u5c3e\u90e8", fc], ["\u5c3e\u90e8 tokens", fmt(d.tailTokens)],
-      ["estimatedTokens", fmt(d.estimatedTokens) + " (\u542b\u5f00\u9500)"], ["tokenBudget", fmt(d.tokenBudget)]
+      ["estimatedTokens", fmt(d.estimatedTokens) + " (\u6570 content JSON)"], ["tokenBudget", fmt(d.tokenBudget)]
     ];
     for (const [k, v] of kvs) {
       const row = document.createElement("div"); row.className = "lcm-kv";
@@ -907,7 +907,7 @@ function renderAssembleCard(assembleEntries) {
     if (d.estimatedTokens) {
       const etRow = document.createElement("div"); etRow.className = "lcm-kv";
       const etL = document.createElement("span"); etL.className = "lcm-kv-label"; etL.textContent = "estimatedTokens";
-      const etV = document.createElement("span"); etV.className = "lcm-kv-value"; etV.textContent = fmt(d.estimatedTokens) + " (\u542b\u5f00\u9500)";
+      const etV = document.createElement("span"); etV.className = "lcm-kv-value"; etV.textContent = fmt(d.estimatedTokens) + " (\u6570 content JSON)";
       etRow.appendChild(etL); etRow.appendChild(etV); section.appendChild(etRow);
     }
     const saved = d.tokensSaved || 0;
