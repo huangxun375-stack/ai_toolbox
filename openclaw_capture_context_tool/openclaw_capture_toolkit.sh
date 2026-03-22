@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -142,6 +142,8 @@ Commands:
   proxy-run       Run one command with proxy env (use: proxy-run -- <cmd...>)
   export-offline  Export current captured data to standalone HTML
   instructions    Print quick usage steps
+  setup           Check prerequisites and create Python venv
+  diag            Parse and display LCM diagnostics
 
 Options:
   --state-dir PATH
@@ -172,6 +174,10 @@ Options:
   --title TEXT
   --max-traces N
   --timeout SECONDS
+  --session ID       (diag) filter by sessionId
+  --stage STAGES     (diag) filter by stage (comma-separated)
+  --round N          (diag) show only round N
+  --raw              (diag) output raw JSON
   --help
 USAGE
 }
@@ -404,6 +410,10 @@ parse_args() {
         PROXY_RUN_CMD=("$@")
         break
         ;;
+      --session) DIAG_SESSION="$2"; shift 2 ;;
+      --stage) DIAG_STAGE="$2"; shift 2 ;;
+      --round) DIAG_ROUND="$2"; shift 2 ;;
+      --raw) DIAG_RAW=1; shift ;;
       --help|-h) usage; exit 0 ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -848,6 +858,126 @@ Quick Steps (recommended):
 EOF
 }
 
+# ---- setup command ----
+
+cmd_setup() {
+  log "=== OpenClaw Capture Toolkit Setup ==="
+  local ok=true
+
+  # Check Python
+  local py=""
+  if [[ -n "${CAPTURE_API_PYTHON:-}" ]] && command -v "$CAPTURE_API_PYTHON" &>/dev/null; then
+    py="$CAPTURE_API_PYTHON"
+  elif [[ -x "$CAPTURE_TOOL_DIR/.venv/bin/python" ]]; then
+    py="$CAPTURE_TOOL_DIR/.venv/bin/python"
+  elif command -v python3 &>/dev/null; then
+    py="$(command -v python3)"
+  fi
+
+  if [[ -n "$py" ]]; then
+    local pyver
+    pyver="$("$py" --version 2>&1)"
+    log "[OK] Python found: $pyver ($py)"
+  else
+    log "[MISSING] python3 not found. Install Python 3.10+ first."
+    ok=false
+  fi
+
+  # Check mitmdump
+  local mitm="${MITMDUMP_BIN:-$(command -v mitmdump 2>/dev/null || true)}"
+  if [[ -n "$mitm" ]]; then
+    local mver
+    mver="$("$mitm" --version 2>&1 | head -1)"
+    log "[OK] mitmdump found: $mver"
+  else
+    log "[MISSING] mitmdump not found. Install: pip install 'mitmproxy>=11.0.0'"
+    ok=false
+  fi
+
+  # Create venv if not exists
+  local venv_dir="$CAPTURE_TOOL_DIR/.venv"
+  if [[ -d "$venv_dir" ]]; then
+    log "[OK] Python venv exists: $venv_dir"
+  else
+    if [[ -n "$py" ]]; then
+      log "Creating Python venv at $venv_dir ..."
+      "$py" -m venv "$venv_dir"
+      log "[OK] venv created"
+    else
+      log "[SKIP] Cannot create venv (python3 not found)"
+      ok=false
+    fi
+  fi
+
+  # Install requirements
+  local req_file="$SCRIPT_DIR/requirements.txt"
+  if [[ -f "$req_file" ]] && [[ -x "$venv_dir/bin/pip" ]]; then
+    log "Installing requirements ..."
+    "$venv_dir/bin/pip" install -q -r "$req_file"
+    log "[OK] Requirements installed"
+  fi
+
+  # Copy env.example if .env missing
+  local env_file="${TOOLKIT_ENV_FILE:-$SCRIPT_DIR/.env}"
+  if [[ ! -f "$env_file" ]] && [[ -f "$SCRIPT_DIR/env.example" ]]; then
+    cp "$SCRIPT_DIR/env.example" "$env_file"
+    log "[OK] Copied env.example -> .env (review and edit as needed)"
+  elif [[ -f "$env_file" ]]; then
+    log "[OK] .env file exists"
+  fi
+
+  # Check ports
+  for port in "${MITM_PORT:-18080}" "${CAPTURE_API_PORT:-8000}"; do
+    if ss -tlnp 2>/dev/null | grep -q ":${port} " ; then
+      log "[WARN] Port $port is already in use"
+    else
+      log "[OK] Port $port is available"
+    fi
+  done
+
+  # Check OpenClaw
+  local oc_bin="${OPENCLAW_BIN:-$(command -v openclaw 2>/dev/null || true)}"
+  if [[ -n "$oc_bin" ]]; then
+    log "[OK] OpenClaw binary found: $oc_bin"
+  else
+    log "[INFO] openclaw not in PATH (optional: set OPENCLAW_BIN or install openclaw)"
+  fi
+
+  if $ok; then
+    log "=== Setup complete. Run: ./openclaw_capture_toolkit.sh up ==="
+  else
+    log "=== Setup incomplete. Fix the items marked [MISSING] above. ==="
+  fi
+}
+
+# ---- diag command ----
+
+cmd_diag() {
+  local api_python="$CAPTURE_API_PYTHON"
+  if [[ -z "$api_python" ]]; then
+    api_python="$CAPTURE_TOOL_DIR/.venv/bin/python"
+  fi
+  if [[ ! -x "$api_python" ]]; then
+    api_python="$(command -v python3 || true)"
+  fi
+  [[ -n "$api_python" ]] || die "python3 not found"
+
+  local diag_script
+  diag_script="$(dirname "$CAPTURE_TOOL_DIR")/capture_tool/tools/context_capture/diag_cli.py"
+  if [[ ! -f "$diag_script" ]]; then
+    diag_script="$CAPTURE_TOOL_DIR/tools/context_capture/diag_cli.py"
+  fi
+  [[ -f "$diag_script" ]] || die "diag_cli.py not found at $diag_script"
+
+  local args=()
+  [[ -n "${DIAG_SESSION:-}" ]] && args+=(--session "$DIAG_SESSION")
+  [[ -n "${DIAG_STAGE:-}" ]] && args+=(--stage "$DIAG_STAGE")
+  [[ -n "${DIAG_ROUND:-}" ]] && args+=(--round "$DIAG_ROUND")
+  [[ -n "${DIAG_RAW:-}" ]] && args+=(--raw)
+
+  "$api_python" "$diag_script" "${args[@]}" "$@"
+}
+
 main() {
   if [[ $# -lt 1 ]]; then
     usage
@@ -888,6 +1018,8 @@ main() {
     proxy-run) proxy_run ;;
     export-offline) export_offline ;;
     instructions) print_instructions ;;
+    setup) cmd_setup ;;
+    diag) cmd_diag "$@" ;;
     *) die "unknown command: $cmd" ;;
   esac
 }

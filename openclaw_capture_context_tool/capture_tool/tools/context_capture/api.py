@@ -1,4 +1,4 @@
-"""Local API scaffold for context capture tool."""
+﻿"""Local API scaffold for context capture tool."""
 
 from __future__ import annotations
 
@@ -823,6 +823,57 @@ def create_app(*, data_dir: Path) -> FastAPI:
             scenario_a_prefix=scenario_a_prefix,
             scenario_b_prefix=scenario_b_prefix,
         )
+
+    _lcm_cache: dict[str, Any] = {"mtime": 0.0, "size": 0, "entries": []}
+
+    @app.get("/api/lcm-diagnostics")
+    def get_lcm_diagnostics(
+        session_id: str | None = None,
+        stage: str | None = None,
+        after_ts: int | None = None,
+    ) -> list[dict[str, Any]]:
+        lcm_path = os.environ.get("LCM_DIAGNOSTICS_PATH")
+        lcm_log = Path(os.path.expanduser(lcm_path)) if lcm_path else Path.home() / ".openclaw" / "lcm-diagnostics.jsonl"
+        if not lcm_log.exists():
+            return []
+
+        try:
+            stat = lcm_log.stat()
+            cur_mtime = stat.st_mtime
+            cur_size = stat.st_size
+        except OSError:
+            return []
+
+        if cur_mtime != _lcm_cache["mtime"] or cur_size != _lcm_cache["size"]:
+            entries: list[dict[str, Any]] = []
+            try:
+                for raw_line in lcm_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        parsed = json.loads(raw_line)
+                        if isinstance(parsed, dict):
+                            entries.append(parsed)
+                    except json.JSONDecodeError:
+                        continue
+            except OSError:
+                return []
+            _lcm_cache["mtime"] = cur_mtime
+            _lcm_cache["size"] = cur_size
+            _lcm_cache["entries"] = entries
+
+        result = _lcm_cache["entries"]
+
+        if session_id:
+            result = [e for e in result if e.get("sessionId") == session_id]
+        if stage:
+            stages = set(stage.split(","))
+            result = [e for e in result if e.get("stage") in stages]
+        if after_ts is not None:
+            result = [e for e in result if isinstance(e.get("ts"), (int, float)) and e["ts"] > after_ts]
+
+        return result
 
     @app.get("/")
     def get_web_root() -> FileResponse:

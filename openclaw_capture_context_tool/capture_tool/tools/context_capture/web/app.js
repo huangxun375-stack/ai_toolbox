@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   timeline: [],
   visibleTimeline: [],
   filterNote: "",
@@ -6,470 +6,964 @@ const state = {
   selectedTrace: null,
   traceCache: {},
   loadingToken: 0,
+  lcmDiagnostics: [],
+  showAllMode: false,
+  allTraces: [],
 };
 
-function getElement(id) {
-  return document.getElementById(id);
-}
+function getElement(id) { return document.getElementById(id); }
+function setText(id, v) { const el = getElement(id); if (el) el.textContent = v; }
+function setHidden(id, h) { const el = getElement(id); if (el) el.hidden = h; }
 
-function setText(id, value) {
-  const element = getElement(id);
-  if (element) {
-    element.textContent = value;
-  }
-}
-
-function setHidden(id, hidden) {
-  const element = getElement(id);
-  if (element) {
-    element.hidden = hidden;
-  }
-}
-
-function formatTimestamp(ts) {
-  if (typeof ts !== "number") {
-    return "—";
-  }
+function formatTs(ts) {
+  if (typeof ts !== "number") return "";
   return new Date(ts).toLocaleString();
 }
+function isObj(v) { return v !== null && typeof v === "object" && !Array.isArray(v); }
+function fmt(v) { return Number.isFinite(v) ? Math.trunc(v).toLocaleString() : "0"; }
 
-function isObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+// --------------- direction helpers ---------------
 
-function eventPayload(event) {
-  return isObject(event?.payload_full) ? event.payload_full : {};
-}
+const STAGE_CONFIG = {
+  "user->gateway":  { label: "user -> openclaw",    css: "stage-user" },
+  "gateway->model": { label: "openclaw -> model",   css: "stage-to-model" },
+  "model->gateway": { label: "model -> openclaw",   css: "stage-from-model" },
+  "gateway->tool":  { label: "openclaw -> tool",    css: "stage-tool" },
+  "tool->gateway":  { label: "tool -> openclaw",    css: "stage-tool" },
+  "gateway->ui":    { label: "openclaw -> user",    css: "stage-to-user" },
+};
 
-function formatFlowLabel(event) {
-  const label = typeof event?.flow_label === "string" && event.flow_label
-    ? event.flow_label
-    : (typeof event?.flow_stage === "string" && event.flow_stage
-      ? event.flow_stage
-      : (typeof event?.direction === "string" && event.direction ? event.direction : "unknown"));
-
-  const labelMap = {
-    "USER->openclaw": "user->openclaw",
-    "OPENCLAW->model": "openclaw->model",
-    "OPENCLAW->model (api_request)": "openclaw->model (api_request)",
-    "OPENCLAW->model (internal_ctx)": "openclaw->model (internal_ctx)",
-    "MODEL->openclaw": "model->openclaw",
-    "MODEL->openclaw (api_response)": "model->openclaw (api_response)",
-    "MODEL->openclaw (internal_ctx)": "model->openclaw (internal_ctx)",
-    "OPENCLAW->user": "openclaw->user",
-    "OPENCLAW->tool": "openclaw->tool",
-    "TOOL->openclaw": "tool->openclaw",
-    "user->gateway": "user->openclaw",
-    "gateway->model": "openclaw->model",
-    "model->gateway": "model->openclaw",
-    "gateway->ui": "openclaw->user",
-    "gateway->tool": "openclaw->tool",
-    "tool->gateway": "tool->openclaw",
+function classifyDirection(event) {
+  const d = event?.direction;
+  if (typeof d === "string" && STAGE_CONFIG[d]) return d;
+  const fs = event?.flow_stage;
+  const map = {
+    "USER->openclaw": "user->gateway",
+    "OPENCLAW->model": "gateway->model",
+    "MODEL->openclaw": "model->gateway",
+    "OPENCLAW->tool": "gateway->tool",
+    "TOOL->openclaw": "tool->gateway",
+    "OPENCLAW->user": "gateway->ui",
   };
-  return labelMap[label] || label;
+  if (typeof fs === "string" && map[fs]) return map[fs];
+  return d || "unknown";
 }
 
-function isModelToOpenclawEvent(event) {
-  return event?.flow_stage === "MODEL->openclaw" || event?.direction === "model->gateway";
+// --------------- content extraction ---------------
+
+function extractTextFromContent(val) {
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) {
+    return val.map(item => {
+      if (typeof item === "string") return item;
+      if (isObj(item)) {
+        if (typeof item.text === "string" && item.text) return item.text;
+        if (item.content) return extractTextFromContent(item.content);
+      }
+      return "";
+    }).filter(Boolean).join("\n");
+  }
+  if (isObj(val)) {
+    if (typeof val.text === "string" && val.text) return val.text;
+    if (val.content) return extractTextFromContent(val.content);
+  }
+  return "";
 }
 
-function isOpenclawToToolEvent(event) {
-  return event?.flow_stage === "OPENCLAW->tool" || event?.direction === "gateway->tool";
+function lastUserMessage(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!isObj(m) || m.role !== "user") continue;
+    const text = extractTextFromContent(m.content);
+    if (text) return text;
+  }
+  return "";
 }
 
-function isToolToOpenclawEvent(event) {
-  return event?.flow_stage === "TOOL->openclaw" || event?.direction === "tool->gateway";
-}
-
-function toolCallKey(event) {
-  const payload = eventPayload(event);
-  if (typeof payload.tool_call_id === "string" && payload.tool_call_id) {
-    return payload.tool_call_id;
-  }
-  if (typeof payload.run_id === "string" && payload.run_id) {
-    return payload.run_id;
-  }
-  return null;
-}
-
-function isMatchingToolEnd(startEvent, endEvent) {
-  if (!isOpenclawToToolEvent(startEvent) || !isToolToOpenclawEvent(endEvent)) {
-    return false;
-  }
-
-  const startKey = toolCallKey(startEvent);
-  const endKey = toolCallKey(endEvent);
-  if (startKey && endKey) {
-    return startKey === endKey;
-  }
-
-  const startPayload = eventPayload(startEvent);
-  const endPayload = eventPayload(endEvent);
-  return (
-    typeof startPayload.tool === "string"
-    && startPayload.tool
-    && typeof endPayload.tool === "string"
-    && endPayload.tool
-    && startPayload.tool === endPayload.tool
-  );
-}
-
-function getModelEventFlowId(event) {
-  const payload = event?.payload_full;
-  if (isObject(payload) && typeof payload.request_flow_id === "string" && payload.request_flow_id) {
-    return payload.request_flow_id;
-  }
-  return null;
-}
-
-function getModelEventTypeName(event) {
-  const payload = event?.payload_full;
-  if (isObject(payload) && typeof payload.type === "string" && payload.type) {
-    return payload.type;
-  }
-  if (typeof event?.event_type === "string" && event.event_type) {
-    return event.event_type;
-  }
-  return "unknown";
-}
-
-function appendText(parts, value) {
-  if (typeof value === "string" && value) {
-    parts.push(value);
-  }
-}
-
-function extractPayloadTextBlocks(payload) {
-  const blocks = [];
-  if (!isObject(payload)) {
-    return blocks;
-  }
-
-  appendText(blocks, payload.delta);
-  appendText(blocks, payload.response_text);
-  appendText(blocks, payload.text);
-
+function extractResponseText(payload) {
+  if (!isObj(payload)) return "";
+  if (typeof payload.response_text === "string" && payload.response_text) return payload.response_text;
+  if (typeof payload.text === "string" && payload.text) return payload.text;
+  if (typeof payload.merged_text === "string" && payload.merged_text) return payload.merged_text;
   const output = payload.output;
   if (Array.isArray(output)) {
     for (const item of output) {
-      if (!isObject(item)) {
-        continue;
-      }
-      appendText(blocks, item.text);
-      if (!Array.isArray(item.content)) {
-        continue;
-      }
-      for (const contentItem of item.content) {
-        if (!isObject(contentItem)) {
-          continue;
+      if (!isObj(item)) continue;
+      if (typeof item.text === "string" && item.text) return item.text;
+      if (Array.isArray(item.content)) {
+        for (const b of item.content) {
+          if (isObj(b) && typeof b.text === "string" && b.text) return b.text;
         }
-        appendText(blocks, contentItem.text);
       }
     }
   }
-
-  return blocks;
+  return "";
 }
 
-function pickToolCallIdentity(toolCall, index) {
-  const callIndex = Number.isInteger(toolCall?.index) ? toolCall.index : index;
-  if (typeof toolCall?.id === "string" && toolCall.id) {
-    return `id:${toolCall.id}`;
+function extractUsage(payload) {
+  if (!isObj(payload)) return null;
+  let u = payload.usage;
+  if (!isObj(u) && isObj(payload.response)) u = payload.response?.usage;
+  if (!isObj(u)) return null;
+  const input = u.input_tokens || u.inputTokens || u.input || 0;
+  const output = u.output_tokens || u.outputTokens || u.output || 0;
+  const total = u.total_tokens || u.totalTokens || u.total || (input + output);
+  return { input, output, total };
+}
+
+function extractToolCalls(payload) {
+  if (!isObj(payload)) return [];
+  const calls = [];
+  if (Array.isArray(payload.tool_calls)) {
+    for (const tc of payload.tool_calls) {
+      if (!isObj(tc)) continue;
+      calls.push({ name: tc.name || "unknown", args: tc.arguments || "", id: tc.id || "" });
+    }
   }
-  return `index:${callIndex}`;
+  if (typeof payload.tool === "string" && payload.tool) {
+    calls.push({ name: payload.tool, args: "", id: payload.tool_call_id || "" });
+  }
+  return calls;
 }
 
-function extractModelDeltaParts(payload) {
-  const assistantParts = [];
+function mergeModelStreamEvents(events) {
+  const textParts = [];
   const reasoningParts = [];
   const toolCalls = new Map();
+  let usage = null;
+  let responseText = "";
 
-  if (!isObject(payload)) {
-    return { assistantParts, reasoningParts, toolCalls };
-  }
+  for (const ev of events) {
+    const p = ev?.payload_full;
+    if (!isObj(p)) continue;
 
-  for (const block of extractPayloadTextBlocks(payload)) {
-    appendText(assistantParts, block);
-  }
-
-  const choices = payload.choices;
-  if (!Array.isArray(choices)) {
-    return { assistantParts, reasoningParts, toolCalls };
-  }
-
-  for (const choice of choices) {
-    if (!isObject(choice)) {
-      continue;
-    }
-    const delta = choice.delta;
-    if (!isObject(delta)) {
+    // Anthropic SSE: content_block_delta with nested delta object
+    if (p.type === "content_block_delta" && isObj(p.delta)) {
+      if (p.delta.type === "text_delta" && typeof p.delta.text === "string") {
+        textParts.push(p.delta.text);
+      }
+      if (p.delta.type === "thinking_delta" && typeof p.delta.thinking === "string") {
+        reasoningParts.push(p.delta.thinking);
+      }
       continue;
     }
 
-    appendText(assistantParts, delta.content);
-    appendText(reasoningParts, delta.reasoning_content);
-
-    const deltaToolCalls = delta.tool_calls;
-    if (!Array.isArray(deltaToolCalls)) {
+    // Anthropic SSE: message_delta with usage
+    if (p.type === "message_delta" && isObj(p.usage)) {
+      const u = extractUsage({ usage: p.usage });
+      if (u) usage = u;
       continue;
     }
 
-    for (const [index, toolCall] of deltaToolCalls.entries()) {
-      if (!isObject(toolCall)) {
-        continue;
-      }
-      const identity = pickToolCallIdentity(toolCall, index);
-      const current = toolCalls.get(identity) || {
-        id: typeof toolCall.id === "string" ? toolCall.id : null,
-        index: Number.isInteger(toolCall.index) ? toolCall.index : index,
-        name: null,
-        argumentsParts: [],
-      };
-
-      if (typeof toolCall.id === "string" && toolCall.id) {
-        current.id = toolCall.id;
-      }
-      const fn = isObject(toolCall.function) ? toolCall.function : null;
-      if (fn && typeof fn.name === "string" && fn.name) {
-        current.name = fn.name;
-      }
-      if (fn && typeof fn.arguments === "string" && fn.arguments) {
-        current.argumentsParts.push(fn.arguments);
-      }
-      toolCalls.set(identity, current);
-    }
-  }
-
-  return { assistantParts, reasoningParts, toolCalls };
-}
-
-function buildMergedModelEvent(group) {
-  const first = group[0];
-  const last = group[group.length - 1];
-
-  const typeCounter = new Map();
-  const assistantParts = [];
-  const reasoningParts = [];
-  const mergedToolCalls = new Map();
-  let flowId = null;
-
-  for (const event of group) {
-    const typeName = getModelEventTypeName(event);
-    typeCounter.set(typeName, (typeCounter.get(typeName) || 0) + 1);
-
-    const payload = event?.payload_full;
-    if (isObject(payload) && typeof payload.request_flow_id === "string" && payload.request_flow_id) {
-      flowId = flowId || payload.request_flow_id;
+    // Skip non-content Anthropic SSE events
+    if (p.type === "message_start" || p.type === "message_stop" ||
+        p.type === "content_block_start" || p.type === "content_block_stop" ||
+        p.type === "ping") {
+      continue;
     }
 
-    const parts = extractModelDeltaParts(payload);
-    for (const part of parts.assistantParts) {
-      appendText(assistantParts, part);
+    // OpenAI / generic format
+    if (typeof p.delta === "string") textParts.push(p.delta);
+    if (typeof p.merged_text === "string" && p.merged_text) textParts.push(p.merged_text);
+    const rt = extractResponseText(p);
+    if (rt) responseText = rt;
+    const u = extractUsage(p);
+    if (u) usage = u;
+    if (Array.isArray(p.choices)) {
+      for (const c of p.choices) {
+        if (!isObj(c?.delta)) continue;
+        if (typeof c.delta.content === "string") textParts.push(c.delta.content);
+        if (typeof c.delta.reasoning_content === "string") reasoningParts.push(c.delta.reasoning_content);
+      }
     }
-    for (const part of parts.reasoningParts) {
-      appendText(reasoningParts, part);
-    }
-    for (const [key, value] of parts.toolCalls.entries()) {
-      const current = mergedToolCalls.get(key) || {
-        id: value.id || null,
-        index: value.index,
-        name: value.name || null,
-        argumentsParts: [],
-      };
-      if (!current.id && value.id) {
-        current.id = value.id;
-      }
-      if (!current.name && value.name) {
-        current.name = value.name;
-      }
-      if (Array.isArray(value.argumentsParts) && value.argumentsParts.length > 0) {
-        current.argumentsParts.push(...value.argumentsParts);
-      }
-      mergedToolCalls.set(key, current);
+    for (const tc of extractToolCalls(p)) {
+      const key = tc.id || tc.name;
+      if (!toolCalls.has(key)) toolCalls.set(key, tc);
     }
   }
-
-  const mergedAssistantText = assistantParts.join("");
-  const mergedReasoningText = reasoningParts.join("");
-  const toolCallList = [...mergedToolCalls.values()]
-    .sort((a, b) => a.index - b.index)
-    .map((item) => ({
-      id: item.id,
-      index: item.index,
-      name: item.name || "unknown",
-      arguments: item.argumentsParts.join(""),
-    }));
-  const typeSummary = [...typeCounter.entries()]
-    .map(([name, count]) => `${name} x${count}`)
-    .join(", ");
-
-  const startTs = first?.ts;
-  const endTs = last?.ts;
-  const duration = typeof startTs === "number" && typeof endTs === "number"
-    ? `${Math.max(0, endTs - startTs)} ms`
-    : "unknown";
-  const eventCount = group.length;
-  const summaryLine = `[merged stream] events=${eventCount}, duration=${duration}${flowId ? `, flow=${flowId}` : ""}`;
-  const toolSummary = toolCallList.length > 0
-    ? `[tool calls] ${toolCallList.map((item) => `${item.name}${item.id ? `(${item.id})` : ""}`).join(", ")}`
-    : "";
-
-  const previewSource = mergedAssistantText || mergedReasoningText || toolSummary;
-  const preview = previewSource
-    ? previewSource.slice(0, 160)
-    : `${summaryLine}${typeSummary ? `, types: ${typeSummary}` : ""}`;
-
-  const fullSections = [];
-  if (mergedAssistantText) {
-    fullSections.push(`[assistant output]\n${mergedAssistantText}`);
-  }
-  if (mergedReasoningText) {
-    fullSections.push(`[assistant reasoning]\n${mergedReasoningText}`);
-  }
-  if (toolCallList.length > 0) {
-    const toolText = toolCallList.map((item) => {
-      const lines = [`name: ${item.name}`, `index: ${item.index}`];
-      if (item.id) {
-        lines.push(`id: ${item.id}`);
-      }
-      if (item.arguments) {
-        lines.push(`arguments: ${item.arguments}`);
-      }
-      return lines.join(" | ");
-    }).join("\n");
-    fullSections.push(`[tool calls]\n${toolText}`);
-  }
-  fullSections.push(summaryLine);
-  if (typeSummary) {
-    fullSections.push(`types: ${typeSummary}`);
-  }
-
   return {
-    ...first,
-    event_type: "model_stream_group",
-    flow_label: `${first?.flow_label || "model->openclaw"} (merged ${eventCount})`,
-    content_preview: preview,
-    content_full: fullSections.join("\n\n"),
-    payload_full: {
-      merged_stream: true,
-      request_flow_id: flowId,
-      event_count: eventCount,
-      start_ts: startTs,
-      end_ts: endTs,
-      merged_text: mergedAssistantText,
-      merged_reasoning_text: mergedReasoningText,
-      tool_calls: toolCallList,
-      event_type_counts: Object.fromEntries(typeCounter),
-    },
+    text: responseText || textParts.join(""),
+    reasoning: reasoningParts.join(""),
+    usage,
+    toolCalls: [...toolCalls.values()],
   };
 }
 
-function buildMergedToolCallEvent(startEvent, endEvent) {
-  const startPayload = eventPayload(startEvent);
-  const endPayload = eventPayload(endEvent);
-  const toolName = typeof startPayload.tool === "string" && startPayload.tool
-    ? startPayload.tool
-    : (typeof endPayload.tool === "string" ? endPayload.tool : "unknown");
-  const callId = typeof startPayload.tool_call_id === "string" && startPayload.tool_call_id
-    ? startPayload.tool_call_id
-    : (typeof endPayload.tool_call_id === "string" ? endPayload.tool_call_id : null);
-  const runId = typeof startPayload.run_id === "string" && startPayload.run_id
-    ? startPayload.run_id
-    : (typeof endPayload.run_id === "string" ? endPayload.run_id : null);
+// --------------- group events into consecutive direction blocks ---------------
 
-  const startTs = typeof startEvent?.ts === "number" ? startEvent.ts : null;
-  const endTs = typeof endEvent?.ts === "number" ? endEvent.ts : null;
-  const duration = (startTs !== null && endTs !== null) ? Math.max(0, endTs - startTs) : null;
-  const previewParts = [`tool=${toolName}`];
-  if (callId) {
-    previewParts.push(`call=${callId}`);
-  }
-  if (duration !== null) {
-    previewParts.push(`duration=${duration} ms`);
-  }
-
-  return {
-    ...startEvent,
-    event_type: "tool_call_group",
-    flow_stage: "OPENCLAW->tool",
-    flow_label: "openclaw->tool",
-    content_preview: previewParts.join(", "),
-    content_full: [
-      "[merged tool call]",
-      `tool: ${toolName}`,
-      callId ? `tool_call_id: ${callId}` : null,
-      runId ? `run_id: ${runId}` : null,
-      startTs !== null ? `start_ts: ${startTs}` : null,
-      endTs !== null ? `end_ts: ${endTs}` : null,
-      duration !== null ? `duration_ms: ${duration}` : null,
-    ].filter(Boolean).join("\n"),
-    payload_full: {
-      merged_tool_call: true,
-      tool: toolName,
-      tool_call_id: callId,
-      run_id: runId,
-      start_ts: startTs,
-      end_ts: endTs,
-      duration_ms: duration,
-      start_event: startPayload,
-      end_event: endPayload,
-    },
-    ts: startTs ?? endTs ?? startEvent?.ts,
-    ts_iso: startEvent?.ts_iso || endEvent?.ts_iso || null,
-  };
-}
-
-function mergeFlowTimelineEvents(events) {
-  const merged = [];
-  let modelGroup = [];
-  let groupFlowId = null;
-
-  const flushModelGroup = () => {
-    if (modelGroup.length === 0) {
-      return;
+function groupIntoBlocks(events) {
+  const blocks = [];
+  let cur = null;
+  let curEvents = [];
+  for (const ev of events) {
+    const dir = classifyDirection(ev);
+    if (dir !== cur && curEvents.length > 0) {
+      blocks.push({ direction: cur, events: curEvents });
+      curEvents = [];
     }
-    merged.push(modelGroup.length === 1 ? modelGroup[0] : buildMergedModelEvent(modelGroup));
-    modelGroup = [];
-    groupFlowId = null;
-  };
+    cur = dir;
+    curEvents.push(ev);
+  }
+  if (curEvents.length > 0) blocks.push({ direction: cur, events: curEvents });
+    return blocks;
+  }
 
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
-    if (!isModelToOpenclawEvent(event)) {
-      flushModelGroup();
-      if (isOpenclawToToolEvent(event) && index + 1 < events.length) {
-        const nextEvent = events[index + 1];
-        if (isMatchingToolEnd(event, nextEvent)) {
-          merged.push(buildMergedToolCallEvent(event, nextEvent));
-          index += 1;
-          continue;
+// --------------- group blocks into rounds ---------------
+// A round starts with user->gateway (or gateway->model if no user event)
+// and ends right before the next user->gateway.
+// The last block of a round that is gateway->ui is the "output" section.
+
+function groupBlocksIntoRounds(blocks) {
+  const rounds = [];
+  let currentBlocks = [];
+
+  for (const block of blocks) {
+    if (block.direction === "user->gateway" && currentBlocks.length > 0) {
+      rounds.push(currentBlocks);
+      currentBlocks = [];
+    }
+    currentBlocks.push(block);
+  }
+  if (currentBlocks.length > 0) rounds.push(currentBlocks);
+  return rounds;
+}
+
+// --------------- extract key info per block ---------------
+
+function buildBlockSummary(block) {
+  const { direction, events } = block;
+  const first = events[0]?.payload_full || {};
+  const last = events[events.length - 1]?.payload_full || {};
+  const config = STAGE_CONFIG[direction] || { label: direction, css: "" };
+  const ts = events[0]?.ts;
+  const tsEnd = events[events.length - 1]?.ts;
+
+  const result = { direction, config, ts, tsEnd, title: "", lines: [], meta: [], fields: [] };
+
+  if (direction === "user->gateway") {
+    let text = "";
+    if (typeof first.text === "string" && first.text) text = first.text;
+    if (!text && typeof first.message === "string" && first.message) text = first.message;
+    if (!text) text = extractTextFromContent(first.content) || extractTextFromContent(first.input) || "";
+    if (!text && Array.isArray(first.messages)) text = lastUserMessage(first.messages);
+    result.title = text || "(user input)";
+
+  } else if (direction === "gateway->model") {
+    const model = first.model || "unknown";
+    const msgs = Array.isArray(first.messages) ? first.messages : [];
+    const lastUser = lastUserMessage(msgs);
+    result.title = lastUser ? (lastUser.length > 100 ? lastUser.slice(0, 100) + "..." : lastUser) : "(api request)";
+    result.meta.push(`模型: ${model}`);
+    if (msgs.length > 0) result.meta.push(`消息数: ${msgs.length}`);
+    if (first.max_tokens) result.meta.push(`max_tokens: ${first.max_tokens}`);
+
+    const sys = first.system;
+    let sysText = "";
+    if (typeof sys === "string") sysText = sys;
+    else if (Array.isArray(sys)) sysText = sys.map(s => (isObj(s) ? s.text : "") || "").filter(Boolean).join("\n");
+    if (sysText) result.fields.push({ label: "system prompt", value: sysText.length > 500 ? sysText.slice(0, 500) + "..." : sysText, long: true });
+    for (const m of msgs) {
+      if (!isObj(m)) continue;
+      const text = extractTextFromContent(m.content);
+      if (!text) continue;
+      result.fields.push({ label: `[${m.role || "?"}]`, value: text.length > 300 ? text.slice(0, 300) + "..." : text, long: true });
+    }
+
+  } else if (direction === "model->gateway") {
+    const merged = mergeModelStreamEvents(events);
+    result.title = merged.text || (merged.reasoning ? `[thinking] ${merged.reasoning.slice(0, 100)}...` : "(model response)");
+    if (merged.usage) {
+      result.meta.push(`input: ${fmt(merged.usage.input)}`);
+      result.meta.push(`output: ${fmt(merged.usage.output)}`);
+      result.meta.push(`total: ${fmt(merged.usage.total)}`);
+    }
+    if (typeof ts === "number" && typeof tsEnd === "number") {
+      const dur = tsEnd - ts;
+      if (dur > 0) result.meta.push(`耗时: ${fmt(dur)}ms`);
+    }
+    result.meta.push(`events: ${events.length}`);
+    if (merged.toolCalls.length > 0) {
+      result.lines.push(`[tool calls] ${merged.toolCalls.map(tc => tc.name).join(", ")}`);
+    }
+    if (merged.text) result.fields.push({ label: "回复内容", value: merged.text, long: true });
+    if (merged.reasoning) result.fields.push({ label: "推理过程", value: merged.reasoning.length > 500 ? merged.reasoning.slice(0, 500) + "..." : merged.reasoning, long: true });
+    if (merged.toolCalls.length > 0) {
+      for (const tc of merged.toolCalls) {
+        result.fields.push({ label: `工具调用: ${tc.name}`, value: tc.args || "(no args)", long: true });
+      }
+    }
+
+  } else if (direction === "gateway->tool" || direction === "tool->gateway") {
+    const toolName = first.tool || first.name || "unknown";
+    result.title = `工具: ${toolName}`;
+    if (first.tool_call_id) result.meta.push(`call_id: ${first.tool_call_id}`);
+    if (first.duration_ms) result.meta.push(`耗时: ${fmt(first.duration_ms)}ms`);
+
+  } else if (direction === "gateway->ui") {
+    let text = last.text || extractResponseText(last) || extractTextFromContent(last.content) || "";
+    result.title = text || "(final output)";
+
+  } else {
+    result.title = direction;
+  }
+
+  return result;
+}
+
+// --------------- rendering ---------------
+
+function renderBlockCard(summary, compact) {
+  const { config, ts, title, lines, meta, fields } = summary;
+  const card = document.createElement("div");
+  card.className = `stage-card ${config.css}` + (compact ? " stage-compact" : "");
+
+  const header = document.createElement("div");
+  header.className = "stage-header";
+  const labelEl = document.createElement("span");
+  labelEl.className = "stage-label";
+  const dot = document.createElement("span");
+  dot.className = "stage-dot";
+  labelEl.appendChild(dot);
+  labelEl.appendChild(document.createTextNode(config.label));
+  const timeEl = document.createElement("span");
+  timeEl.className = "stage-time";
+  timeEl.textContent = formatTs(ts);
+  header.appendChild(labelEl);
+  header.appendChild(timeEl);
+  card.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "stage-body";
+
+  const titleEl = document.createElement("pre");
+  titleEl.className = "stage-text";
+  const allText = [title, ...lines].filter(Boolean).join("\n");
+  titleEl.textContent = allText;
+  body.appendChild(titleEl);
+
+  if (meta.length > 0) {
+    const metaRow = document.createElement("div");
+    metaRow.className = "stage-meta-row";
+    for (const tag of meta) {
+      const span = document.createElement("span");
+      span.className = "stage-meta-tag";
+      span.textContent = tag;
+      metaRow.appendChild(span);
+    }
+    body.appendChild(metaRow);
+  }
+
+  if (fields.length > 0) {
+    const details = document.createElement("details");
+    details.className = "stage-expand";
+    const summary = document.createElement("summary");
+    summary.textContent = `展开详情 (${fields.length} 项)`;
+    details.appendChild(summary);
+    const table = document.createElement("div");
+    table.className = "stage-fields";
+    for (const f of fields) {
+      const row = document.createElement("div");
+      row.className = "stage-field-row" + (f.long ? " stage-field-long" : "");
+      const lbl = document.createElement("span");
+      lbl.className = "stage-field-label";
+      lbl.textContent = f.label;
+      const val = document.createElement("span");
+      val.className = "stage-field-value";
+      val.textContent = f.value;
+      row.appendChild(lbl);
+      row.appendChild(val);
+      table.appendChild(row);
+    }
+    details.appendChild(table);
+    body.appendChild(details);
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
+function renderInternalArrow() {
+  const el = document.createElement("div");
+  el.className = "internal-arrow";
+  el.textContent = "\u25BC";
+  return el;
+}
+
+// --------------- LCM diagnostics rendering ---------------
+
+const LCM_STAGE_LABELS = {
+  bootstrap_entry: "Bootstrap 开始",
+  bootstrap_import: "Bootstrap 导入",
+  bootstrap_result: "Bootstrap 结果",
+  afterTurn_entry: "afterTurn 回调",
+  ingest: "消息持久化",
+  assemble_skip: "Assemble 跳过",
+  leaf_pass_detail: "叶子压缩详情",
+  compact_skip: "压缩跳过",
+  compact_phase: "压缩阶段",
+  compact_result: "压缩结果",
+  assemble_input: "原始消息输入",
+  compaction_evaluate: "压缩决策",
+  leaf_summary: "叶子摘要",
+  dag_aggregate: "DAG 聚合摘要",
+  context_assemble: "上下文组装",
+  assemble_output: "最终输出",
+};
+
+const LCM_STAGE_ORDER = [
+  "bootstrap_entry", "bootstrap_import", "bootstrap_result",
+  "assemble_skip", "assemble_input", "compaction_evaluate", "leaf_summary",
+  "dag_aggregate", "context_assemble", "assemble_output",
+  "afterTurn_entry", "ingest",
+];
+
+const LCM_SKIP_STAGES = new Set(["assemble_called"]);
+
+const _lcmClaimed = new Set();
+const _lcmTraceAssignment = new Map();
+
+function resetLcmClaimed() { _lcmClaimed.clear(); _lcmTraceAssignment.clear(); }
+
+function preAssignLcmToTraces(allTraces) {
+  _lcmTraceAssignment.clear();
+  if (!state.lcmDiagnostics || state.lcmDiagnostics.length === 0) return;
+
+  const PRE_HTTP = new Set([
+    "bootstrap_entry", "bootstrap_import", "bootstrap_result",
+    "assemble_skip", "assemble_input", "context_assemble", "assemble_output",
+  ]);
+
+  const traceWindows = allTraces.map((trace, idx) => {
+    const events = trace?.events || [];
+    if (events.length === 0) return null;
+    const start = events[0]?.ts || 0;
+    const end = events[events.length - 1]?.ts || start;
+    return { idx, start, end };
+  }).filter(Boolean);
+  if (traceWindows.length === 0) return;
+
+  for (let li = 0; li < state.lcmDiagnostics.length; li++) {
+    const entry = state.lcmDiagnostics[li];
+    const t = entry.ts;
+    if (typeof t !== "number") continue;
+    const isPre = PRE_HTTP.has(entry.stage);
+
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (const tw of traceWindows) {
+      if (isPre) {
+        if (t >= tw.start - 10000 && t <= tw.end + 5000) {
+          const dist = Math.abs(t - tw.start);
+          if (dist < bestDist) { bestDist = dist; bestIdx = tw.idx; }
+        }
+      } else {
+        if (t >= tw.start - 5000 && t <= tw.end + 15000) {
+          const dist = Math.abs(t - tw.end);
+          if (dist < bestDist) { bestDist = dist; bestIdx = tw.idx; }
         }
       }
-      merged.push(event);
-      continue;
     }
+    if (bestIdx < 0) {
+      for (const tw of traceWindows) {
+        const ref = isPre ? tw.start : tw.end;
+        const dist = Math.abs(t - ref);
+        if (dist < bestDist) { bestDist = dist; bestIdx = tw.idx; }
+      }
+    }
+    if (bestIdx >= 0) _lcmTraceAssignment.set(li, bestIdx);
+  }
+}
 
-    const flowId = getModelEventFlowId(event);
-    if (modelGroup.length === 0) {
-      modelGroup.push(event);
-      groupFlowId = flowId;
-      continue;
-    }
+function preAssignLcmToMergedGroups(mergedGroups) {
+  _lcmTraceAssignment.clear();
+  if (!state.lcmDiagnostics || state.lcmDiagnostics.length === 0) return;
 
-    if (groupFlowId && flowId && groupFlowId !== flowId) {
-      flushModelGroup();
-      modelGroup.push(event);
-      groupFlowId = flowId;
-      continue;
+  const PRE_HTTP = new Set([
+    "bootstrap_entry", "bootstrap_import", "bootstrap_result",
+    "assemble_skip", "assemble_input", "context_assemble", "assemble_output",
+  ]);
+
+  const groupWindows = mergedGroups.map((group, idx) => {
+    const events = group?.events || [];
+    if (events.length === 0) return null;
+    const start = events[0]?.ts || 0;
+    const end = events[events.length - 1]?.ts || start;
+    return { idx, start, end };
+  }).filter(Boolean);
+  if (groupWindows.length === 0) return;
+
+  for (let li = 0; li < state.lcmDiagnostics.length; li++) {
+    const entry = state.lcmDiagnostics[li];
+    const t = entry.ts;
+    if (typeof t !== "number") continue;
+    const isPre = PRE_HTTP.has(entry.stage);
+
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (const gw of groupWindows) {
+      if (isPre) {
+        if (t >= gw.start - 10000 && t <= gw.end + 5000) {
+          const dist = Math.abs(t - gw.start);
+          if (dist < bestDist) { bestDist = dist; bestIdx = gw.idx; }
+        }
+      } else {
+        if (t >= gw.start - 5000 && t <= gw.end + 15000) {
+          const dist = Math.abs(t - gw.end);
+          if (dist < bestDist) { bestDist = dist; bestIdx = gw.idx; }
+        }
+      }
     }
-    if (!groupFlowId && flowId) {
-      groupFlowId = flowId;
+    if (bestIdx < 0) {
+      for (const gw of groupWindows) {
+        const ref = isPre ? gw.start : gw.end;
+        const dist = Math.abs(t - ref);
+        if (dist < bestDist) { bestDist = dist; bestIdx = gw.idx; }
+      }
     }
-    modelGroup.push(event);
+    if (bestIdx >= 0) _lcmTraceAssignment.set(li, bestIdx);
+  }
+}
+
+function findLcmEntriesForRound(roundTs, roundEndTs, traceIdx) {
+  if (!state.lcmDiagnostics || state.lcmDiagnostics.length === 0) return [];
+  if (typeof roundTs !== "number") return [];
+  const endTs = typeof roundEndTs === "number" ? roundEndTs : roundTs + 60000;
+
+  return state.lcmDiagnostics.filter((e, idx) => {
+    if (LCM_SKIP_STAGES.has(e.stage)) return false;
+    if (_lcmTraceAssignment.size > 0 && typeof traceIdx === "number") {
+      return _lcmTraceAssignment.get(idx) === traceIdx;
+    }
+    if (_lcmClaimed.has(idx)) return false;
+    const t = e.ts;
+    return typeof t === "number" && t >= roundTs - 5000 && t <= endTs + 10000;
+  }).map((e) => {
+    if (_lcmTraceAssignment.size === 0) {
+      const idx = state.lcmDiagnostics.indexOf(e);
+      _lcmClaimed.add(idx);
+    }
+    return e;
+  }).sort((a, b) => {
+    const ai = LCM_STAGE_ORDER.indexOf(a.stage);
+    const bi = LCM_STAGE_ORDER.indexOf(b.stage);
+    if (ai !== bi) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    return (a.ts || 0) - (b.ts || 0);
+  });
+}
+
+function renderLcmStep(entry) {
+  const step = document.createElement("div");
+  step.className = "lcm-step";
+
+  const header = document.createElement("div");
+  header.className = "lcm-step-header";
+  const stageLabel = document.createElement("span");
+  stageLabel.className = "lcm-step-stage";
+  let stageLabelText = LCM_STAGE_LABELS[entry.stage] || entry.stage;
+  if (entry._leafPassNum) stageLabelText = `第 ${entry._leafPassNum} 次叶子压缩`;
+  stageLabel.textContent = stageLabelText;
+  const timeLabel = document.createElement("span");
+  timeLabel.className = "lcm-step-time";
+  timeLabel.textContent = formatTs(entry.ts);
+  header.appendChild(stageLabel);
+  header.appendChild(timeLabel);
+  step.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "lcm-step-body";
+  const d = entry.data || {};
+
+  const kvPairs = [];
+
+  if (entry.stage === "bootstrap_entry") {
+    kvPairs.push(["会话文件", d.sessionFile || ""]);
+
+  } else if (entry.stage === "bootstrap_import") {
+    kvPairs.push(["导入消息数", d.importedMessages]);
+    kvPairs.push(["总 tokens", fmt(d.totalTokens)]);
+
+  } else if (entry.stage === "bootstrap_result") {
+    kvPairs.push(["是否导入", d.bootstrapped ? "是" : "否"]);
+    kvPairs.push(["导入消息数", d.importedMessages]);
+    if (d.reason) kvPairs.push(["原因", d.reason]);
+
+  } else if (entry.stage === "assemble_skip") {
+    kvPairs.push(["原因", d.reason || "unknown"]);
+    kvPairs.push(["原始消息数", d.messagesCount]);
+    if (d.contextItemsCount != null) kvPairs.push(["context items", d.contextItemsCount]);
+
+  } else if (entry.stage === "afterTurn_entry") {
+    kvPairs.push(["总消息数", d.totalMessages]);
+    kvPairs.push(["新消息数", d.newMessageCount]);
+    kvPairs.push(["是否 heartbeat", d.isHeartbeat ? "是" : "否"]);
+
+  } else if (entry.stage === "ingest") {
+    kvPairs.push(["角色", d.role || "?"]);
+    kvPairs.push(["序号", d.seq]);
+    kvPairs.push(["tokens", fmt(d.tokenCount)]);
+    if (d.contentPreview) kvPairs.push(["内容", d.contentPreview]);
+
+  } else if (entry.stage === "assemble_input") {
+    kvPairs.push(["消息数", d.messagesCount]);
+    kvPairs.push(["输入 tokens", fmt(d.inputTokenEstimate)]);
+    kvPairs.push(["token 预算", fmt(d.tokenBudget)]);
+    kvPairs.push(["含摘要", d.hasSummaryItems ? "是" : "否"]);
+
+  } else if (entry.stage === "compaction_evaluate") {
+    kvPairs.push(["当前 tokens", fmt(d.currentTokens)]);
+    kvPairs.push(["阈值", `${fmt(d.threshold)} (${Math.round((d.contextThreshold || 0) * 100)}%)`]);
+    kvPairs.push(["需要压缩", d.shouldCompact ? "是" : "否"]);
+
+  } else if (entry.stage === "leaf_pass_detail") {
+    kvPairs.push(["输入消息数", d.inputMessageCount]);
+    kvPairs.push(["输入 tokens", fmt(d.inputTokens)]);
+    if (d.leafChunkTokens) kvPairs.push(["leafChunkTokens 阈值", fmt(d.leafChunkTokens)]);
+    kvPairs.push(["输出 tokens", fmt(d.outputTokens)]);
+    const saved = (d.inputTokens || 0) - (d.outputTokens || 0);
+    if (saved > 0) kvPairs.push(["节省", `${fmt(saved)} tokens`, true]);
+    if (d.level) kvPairs.push(["级别", d.level]);
+
+  } else if (entry.stage === "compact_skip") {
+    kvPairs.push(["原因", d.reason || ""]);
+    kvPairs.push(["当前 tokens", fmt(d.tokensBefore)]);
+    if (d.threshold) kvPairs.push(["阈值", fmt(d.threshold)]);
+
+  } else if (entry.stage === "compact_phase") {
+    kvPairs.push(["阶段", d.phase === "leaf" ? "叶子压缩" : "聚合压缩"]);
+    kvPairs.push(["状态", d.status === "no_chunks" ? "无可压缩数据" : "无聚合候选"]);
+    kvPairs.push(["原因", d.reason || ""]);
+    if (d.currentTokens) kvPairs.push(["当前 tokens", fmt(d.currentTokens)]);
+    if (d.threshold) kvPairs.push(["阈值", fmt(d.threshold)]);
+
+  } else if (entry.stage === "compact_result") {
+    kvPairs.push(["是否执行", d.actionTaken ? "是" : "否"]);
+    kvPairs.push(["压缩前", fmt(d.tokensBefore)]);
+    kvPairs.push(["压缩后", fmt(d.tokensAfter)]);
+    const saved = d.tokensSaved || 0;
+    if (saved > 0) kvPairs.push(["节省", `${fmt(saved)} tokens`, true]);
+    if (d.condensed) kvPairs.push(["含聚合", "是"]);
+
+  } else if (entry.stage === "leaf_summary") {
+    kvPairs.push(["压缩前", fmt(d.tokensBefore)]);
+    kvPairs.push(["压缩后", fmt(d.tokensAfter)]);
+    const saved = d.tokensSaved || 0;
+    const pct = d.savingPct || 0;
+    kvPairs.push(["节省", `${fmt(saved)} tokens (-${pct}%)`, saved > 0]);
+
+  } else if (entry.stage === "dag_aggregate") {
+    kvPairs.push(["聚合前", fmt(d.tokensBefore)]);
+    kvPairs.push(["聚合后", fmt(d.tokensAfter)]);
+    const saved = d.tokensSaved || 0;
+    const pct = d.savingPct || 0;
+    kvPairs.push(["节省", `${fmt(saved)} tokens (-${pct}%)`, saved > 0]);
+    if (d.level) kvPairs.push(["级别", d.level]);
+
+  } else if (entry.stage === "context_assemble") {
+    kvPairs.push(["原始消息", d.rawMessageCount]);
+    kvPairs.push(["摘要条数", d.summaryCount]);
+    kvPairs.push(["尾部 tokens", fmt(d.tailTokens)]);
+    kvPairs.push(["可驱逐 tokens", fmt(d.evictableTokens)]);
+    kvPairs.push(["预估 tokens", fmt(d.estimatedTokens)]);
+
+  } else if (entry.stage === "assemble_output") {
+    kvPairs.push(["输出消息数", d.outputMessagesCount]);
+    kvPairs.push(["预估 tokens", fmt(d.estimatedTokens)]);
+    kvPairs.push(["原始 tokens", fmt(d.inputTokenEstimate)]);
+    const saved = d.tokensSaved || 0;
+    const pct = d.savingPct || 0;
+    kvPairs.push(["总节省", `${fmt(saved)} tokens (-${pct}%)`, saved > 0]);
+
+  } else {
+    for (const [k, v] of Object.entries(d)) {
+      kvPairs.push([k, typeof v === "object" ? JSON.stringify(v) : String(v)]);
+    }
   }
 
-  flushModelGroup();
-  return merged;
+  for (const [label, value, isSaving] of kvPairs) {
+    const row = document.createElement("div");
+    row.className = "lcm-kv";
+    const lbl = document.createElement("span");
+    lbl.className = "lcm-kv-label";
+    lbl.textContent = label;
+    const val = document.createElement("span");
+    val.className = "lcm-kv-value" + (isSaving ? " lcm-saving" : "");
+    val.textContent = String(value ?? "");
+    row.appendChild(lbl);
+    row.appendChild(val);
+    body.appendChild(row);
+  }
+
+  // Render message list for stages that have it
+  const msgs = d.messages || d.assembledMessages || d.inputMessages;
+  if (Array.isArray(msgs) && msgs.length > 0) {
+    const msgSection = document.createElement("details");
+    msgSection.className = "lcm-messages-section";
+    const msgSummary = document.createElement("summary");
+    msgSummary.textContent = d.inputMessages
+      ? `压缩输入（${msgs.length} 条原始消息）`
+      : `消息列表 (${msgs.length} 条)`;
+    msgSection.appendChild(msgSummary);
+    const msgList = document.createElement("div");
+    msgList.className = "lcm-messages-list";
+    for (const m of msgs) {
+      const msgEl = document.createElement("div");
+      msgEl.className = "lcm-msg lcm-msg-" + (m.role || "unknown");
+      const roleEl = document.createElement("span");
+      roleEl.className = "lcm-msg-role";
+      roleEl.textContent = m.role || "?";
+      const tokEl = document.createElement("span");
+      tokEl.className = "lcm-msg-tokens";
+      tokEl.textContent = `${fmt(m.tokens)} tok`;
+      const textEl = document.createElement("div");
+      textEl.className = "lcm-msg-text";
+      textEl.textContent = m.preview || "(empty)";
+      msgEl.appendChild(roleEl);
+      msgEl.appendChild(tokEl);
+      msgEl.appendChild(textEl);
+      msgList.appendChild(msgEl);
+    }
+    msgSection.appendChild(msgList);
+    body.appendChild(msgSection);
+  }
+
+  // Render summary preview for leaf/dag stages
+  const summaryText = d.summaryPreview || d.outputSummary;
+  if (summaryText && typeof summaryText === "string") {
+    const sumSection = document.createElement("details");
+    sumSection.className = "lcm-messages-section";
+    const sumTitle = document.createElement("summary");
+    sumTitle.textContent = d.outputSummary ? "压缩输出（完整摘要）" : "生成的摘要内容";
+    sumSection.appendChild(sumTitle);
+    const sumText = document.createElement("pre");
+    sumText.className = "lcm-summary-preview";
+    sumText.textContent = summaryText;
+    sumSection.appendChild(sumText);
+    body.appendChild(sumSection);
+  }
+
+  step.appendChild(body);
+  return step;
+}
+
+function renderIngestBatchCard(entries) {
+  const card = document.createElement("div");
+  card.className = "stage-card stage-lcm";
+
+  const header = document.createElement("div");
+  header.className = "lcm-step-header";
+  const stageLabel = document.createElement("span");
+  stageLabel.className = "lcm-step-stage";
+  stageLabel.textContent = `ingestBatch (${entries.length} 条消息持久化)`;
+  const timeLabel = document.createElement("span");
+  timeLabel.className = "lcm-step-time";
+  timeLabel.textContent = formatTs(entries[0]?.ts);
+  header.appendChild(stageLabel);
+  header.appendChild(timeLabel);
+  card.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "lcm-step-body";
+
+  const totalTokens = entries.reduce((s, e) => s + (e.data?.tokenCount || 0), 0);
+  const metaRow = document.createElement("div");
+  metaRow.className = "lcm-kv";
+  const metaLabel = document.createElement("span");
+  metaLabel.className = "lcm-kv-label";
+  metaLabel.textContent = "总 tokens";
+  const metaVal = document.createElement("span");
+  metaVal.className = "lcm-kv-value";
+  metaVal.textContent = fmt(totalTokens);
+  metaRow.appendChild(metaLabel);
+  metaRow.appendChild(metaVal);
+  body.appendChild(metaRow);
+
+  const msgList = document.createElement("div");
+  msgList.className = "lcm-messages-list";
+  for (const e of entries) {
+    const d = e.data || {};
+    const msgEl = document.createElement("div");
+    msgEl.className = "lcm-msg lcm-msg-" + (d.role || "unknown");
+    const roleEl = document.createElement("span");
+    roleEl.className = "lcm-msg-role";
+    roleEl.textContent = d.role || "?";
+    const tokEl = document.createElement("span");
+    tokEl.className = "lcm-msg-tokens";
+    tokEl.textContent = `seq=${d.seq || "?"} ${fmt(d.tokenCount)} tok`;
+    const textEl = document.createElement("div");
+    textEl.className = "lcm-msg-text";
+    textEl.textContent = d.contentPreview || "(empty)";
+    msgEl.appendChild(roleEl);
+    msgEl.appendChild(tokEl);
+    msgEl.appendChild(textEl);
+    msgList.appendChild(msgEl);
+  }
+  body.appendChild(msgList);
+  card.appendChild(body);
+  return card;
+}
+
+function renderLcmAsCard(entry) {
+  const card = document.createElement("div");
+  card.className = "stage-card stage-lcm";
+  const step = renderLcmStep(entry);
+  for (const child of [...step.children]) card.appendChild(child);
+  return card;
+}
+
+function renderRound(roundBlocks, roundIndex, traceIdx) {
+  const container = document.createElement("section");
+  container.className = "round";
+
+  const startTs = roundBlocks[0]?.events?.[0]?.ts;
+  const lastBlock = roundBlocks[roundBlocks.length - 1];
+  const endTs = lastBlock?.events?.[lastBlock.events.length - 1]?.ts;
+  let durText = "";
+  if (typeof startTs === "number" && typeof endTs === "number") {
+    durText = ` (${fmt(endTs - startTs)}ms)`;
+  }
+  const roundHeader = document.createElement("div");
+  roundHeader.className = "round-header";
+  roundHeader.textContent = `第 ${roundIndex + 1} 轮${durText}`;
+  container.appendChild(roundHeader);
+
+  // Synthesize user block if missing
+  let userBlock = roundBlocks[0]?.direction === "user->gateway" ? roundBlocks[0] : null;
+  const allBlocks = roundBlocks.filter(b => b !== userBlock);
+  if (!userBlock) {
+    const firstModel = allBlocks.find(b => b.direction === "gateway->model");
+    if (firstModel) {
+      const p = firstModel.events[0]?.payload_full || {};
+      const msgs = Array.isArray(p.messages) ? p.messages : [];
+      const userText = lastUserMessage(msgs);
+      if (userText) {
+        userBlock = {
+          direction: "user->gateway",
+          events: [{ ts: firstModel.events[0]?.ts, payload_full: { text: userText }, direction: "user->gateway" }],
+        };
+      }
+    }
+  }
+
+  // Collect LCM entries for this round
+  const roundStartTs = roundBlocks[0]?.events?.[0]?.ts;
+  const roundEndTs = endTs;
+  const lcmEntries = findLcmEntriesForRound(roundStartTs, roundEndTs, traceIdx);
+
+  // Split LCM entries by semantic phase
+  const PRE_HTTP_STAGES = new Set([
+    "bootstrap_entry", "bootstrap_import", "bootstrap_result",
+    "assemble_skip", "assemble_input", "context_assemble", "assemble_output",
+  ]);
+  const preLcm = lcmEntries.filter(e => PRE_HTTP_STAGES.has(e.stage));
+  const postLcm = lcmEntries.filter(e => !PRE_HTTP_STAGES.has(e.stage));
+
+  // Build unified timeline by semantic order
+  const timeline = [];
+
+  // 1. User input
+  if (userBlock) {
+    timeline.push({ type: "http", block: userBlock });
+  }
+
+  // 2. Pre-HTTP LCM (bootstrap, assemble)
+  for (const le of preLcm) {
+    timeline.push({ type: "lcm", entry: le });
+  }
+
+  // 3. HTTP blocks (gateway->model, model->gateway, tool calls)
+  for (const block of allBlocks) {
+    if (block.direction === "gateway->ui") continue;
+    timeline.push({ type: "http", block });
+  }
+
+  // 4. Post-HTTP LCM (afterTurn, ingest, compaction) — sorted by timestamp
+  // Merge consecutive ingest entries into one ingestBatch entry
+  const postLcmSorted = [...postLcm].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  let ingestGroup = [];
+  for (const le of postLcmSorted) {
+    if (le.stage === "ingest") {
+      ingestGroup.push(le);
+    } else {
+      if (ingestGroup.length > 0) {
+        timeline.push({ type: "lcm_batch", entries: ingestGroup });
+        ingestGroup = [];
+      }
+      timeline.push({ type: "lcm", entry: le });
+    }
+  }
+  if (ingestGroup.length > 0) {
+    timeline.push({ type: "lcm_batch", entries: ingestGroup });
+  }
+
+  // 5. Output block
+  let outputBlock = roundBlocks[roundBlocks.length - 1]?.direction === "gateway->ui"
+    ? roundBlocks[roundBlocks.length - 1] : null;
+  if (!outputBlock) {
+    const lastModel = [...allBlocks].reverse().find(b => b.direction === "model->gateway");
+    if (lastModel) {
+      const merged = mergeModelStreamEvents(lastModel.events);
+      if (merged.text) {
+        outputBlock = {
+          direction: "gateway->ui",
+          events: [{ ts: lastModel.events[lastModel.events.length - 1]?.ts, payload_full: { text: merged.text }, direction: "gateway->ui" }],
+        };
+      }
+    }
+  }
+  if (outputBlock) {
+    timeline.push({ type: "http", block: outputBlock });
+  }
+
+  // Render unified timeline
+  let leafPassCount = 0;
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i];
+    if (item.type === "lcm") {
+      if (item.entry.stage === "leaf_pass_detail") {
+        leafPassCount++;
+        item.entry = { ...item.entry, _leafPassNum: leafPassCount };
+      }
+      container.appendChild(renderLcmAsCard(item.entry));
+    } else if (item.type === "lcm_batch") {
+      container.appendChild(renderIngestBatchCard(item.entries));
+    } else {
+      const summary = buildBlockSummary(item.block);
+      const isMiddle = item.block.direction !== "user->gateway" && item.block.direction !== "gateway->ui";
+      container.appendChild(renderBlockCard(summary, isMiddle));
+    }
+    if (i < timeline.length - 1) {
+      container.appendChild(renderInternalArrow());
+    }
+  }
+
+  return container;
+}
+
+// --------------- timeline / session ---------------
+
+function isLcmInternalTrace(trace) {
+  if (!isObj(trace) || !Array.isArray(trace.events)) return false;
+  for (const e of trace.events) {
+    if (e?.direction !== "gateway->model") continue;
+    const p = e?.payload_full;
+    if (!isObj(p)) continue;
+    const sys = p.system;
+    let sysText = "";
+    if (typeof sys === "string") sysText = sys;
+    else if (Array.isArray(sys)) {
+      for (const s of sys) {
+        if (isObj(s) && typeof s.text === "string") { sysText = s.text; break; }
+      }
+    }
+    if (sysText.includes("You summarize a SEGMENT") || sysText.includes("context-compaction summarization engine")) return true;
+    const msgs = p.messages;
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      const firstContent = extractTextFromContent(msgs[0]?.content);
+      if (firstContent.includes("You summarize a SEGMENT")) return true;
+    }
+  }
+  return false;
 }
 
 function buildVisibleTimeline(timeline) {
@@ -478,39 +972,24 @@ function buildVisibleTimeline(timeline) {
     const tsB = typeof b?.start_ts === "number" ? b.start_ts : 0;
     return tsB - tsA;
   });
-
-  if (ordered.length > 0) {
-    return {
-      list: ordered,
-      note: `当前显示全部会话，共 ${ordered.length} 条。`,
-    };
-  }
-
-  return {
-    list: [],
-    note: "暂无会话数据。",
-  };
+  if (ordered.length > 0) return { list: ordered, note: `共 ${ordered.length} 条会话` };
+  return { list: [], note: "暂无会话数据。" };
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-  return response.json();
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
 }
 
 function selectedTimelineItem() {
-  return state.visibleTimeline.find((item) => String(item.trace_id) === String(state.selectedTraceId)) || null;
+  return state.visibleTimeline.find(i => String(i.trace_id) === String(state.selectedTraceId)) || null;
 }
 
 function renderSessionList() {
   const container = getElement("session-list");
-  if (!container) {
-    return;
-  }
+  if (!container) return;
   container.replaceChildren();
-
   if (state.visibleTimeline.length === 0) {
     const empty = document.createElement("div");
     empty.className = "panel-empty";
@@ -518,130 +997,136 @@ function renderSessionList() {
     container.appendChild(empty);
     return;
   }
-
   for (const trace of state.visibleTimeline) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "session-item";
-    button.classList.toggle("is-selected", String(trace.trace_id) === String(state.selectedTraceId));
+    const cached = state.traceCache[String(trace.trace_id)];
+    const isInternal = cached && isLcmInternalTrace(cached);
 
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "session-item"
+      + (String(trace.trace_id) === String(state.selectedTraceId) ? " is-selected" : "")
+      + (isInternal ? " session-internal" : "");
     const title = document.createElement("div");
     title.className = "session-title";
-    title.textContent = `trace ${trace.trace_id} | ${trace.event_count || 0} events`;
-
-    const subtitle = document.createElement("div");
-    subtitle.className = "session-subtitle";
-    subtitle.textContent = `开始: ${formatTimestamp(trace.start_ts)}`;
-
-    button.appendChild(title);
-    button.appendChild(subtitle);
-    button.addEventListener("click", () => {
-      void selectTrace(trace.trace_id);
-    });
-
-    container.appendChild(button);
+    title.textContent = (isInternal ? "[LCM 内部] " : "") + `trace ${trace.trace_id} | ${trace.event_count || 0} events`;
+    const sub = document.createElement("div");
+    sub.className = "session-subtitle";
+    sub.textContent = formatTs(trace.start_ts);
+    btn.appendChild(title);
+    btn.appendChild(sub);
+    btn.addEventListener("click", () => void selectTrace(trace.trace_id));
+    container.appendChild(btn);
   }
 }
 
 function renderSessionMeta() {
   const container = getElement("session-meta");
-  if (!container) {
-    return;
-  }
+  if (!container) return;
   container.replaceChildren();
-
-  const selectedItem = selectedTimelineItem();
-  if (!selectedItem) {
+  const item = selectedTimelineItem();
+  if (!item) {
     const empty = document.createElement("div");
     empty.className = "panel-empty";
-    empty.textContent = "请选择左侧会话查看抓包内容。";
+    empty.textContent = "请选择左侧会话查看对话流向。";
     container.appendChild(empty);
     return;
   }
-
-  const metaRows = [
-    `trace ${selectedItem.trace_id}`,
-    `${selectedItem.event_count || 0} events`,
-    `${selectedItem.correlation_confidence || "unknown"} confidence`,
-    `${selectedItem.completeness || "unknown"} completeness`,
-    `start ${formatTimestamp(selectedItem.start_ts)}`,
-    `end ${formatTimestamp(selectedItem.end_ts)}`,
-  ];
-
-  for (const row of metaRows) {
+  const pills = [
+    `trace ${item.trace_id}`,
+    `${item.event_count || 0} events`,
+    item.completeness || "",
+    `${formatTs(item.start_ts)} - ${formatTs(item.end_ts)}`,
+  ].filter(Boolean);
+  for (const text of pills) {
     const pill = document.createElement("span");
     pill.className = "meta-pill";
-    pill.textContent = row;
+    pill.textContent = text;
     container.appendChild(pill);
   }
 }
 
+function mergeAdjacentTraces(traces) {
+  if (traces.length <= 1) return traces;
+
+  // Find afterTurn timestamps — these mark round boundaries
+  const afterTurnTimestamps = state.lcmDiagnostics
+    .filter(e => e.stage === "afterTurn_entry")
+    .map(e => e.ts)
+    .sort((a, b) => a - b);
+
+  function hasAfterTurnBetween(tsA, tsB) {
+    return afterTurnTimestamps.some(at => at > tsA && at < tsB);
+  }
+
+  const merged = [];
+  let current = { events: [...(traces[0]?.events || [])], sourceIndices: [0] };
+
+  for (let i = 1; i < traces.length; i++) {
+    const prev = traces[i - 1];
+    const cur = traces[i];
+    const prevEnd = prev?.events?.[prev.events.length - 1]?.ts || 0;
+    const curStart = cur?.events?.[0]?.ts || 0;
+    const gap = curStart - prevEnd;
+
+    // Merge if: gap < 5s AND no afterTurn event between them
+    // (afterTurn marks end of a user turn, so a new turn starts after it)
+    if (gap < 5000 && gap >= 0 && !hasAfterTurnBetween(prevEnd, curStart)) {
+      current.events.push(...(cur.events || []));
+      current.sourceIndices.push(i);
+    } else {
+      merged.push(current);
+      current = { events: [...(cur?.events || [])], sourceIndices: [i] };
+    }
+  }
+  merged.push(current);
+  return merged;
+}
+
+function renderSingleTrace(container, trace, roundOffset, traceIdx) {
+  if (!isObj(trace) || !Array.isArray(trace.events) || trace.events.length === 0) return 0;
+  const blocks = groupIntoBlocks(trace.events);
+  const rounds = groupBlocksIntoRounds(blocks);
+  for (let i = 0; i < rounds.length; i++) {
+    container.appendChild(renderRound(rounds[i], roundOffset + i, traceIdx));
+  }
+  return rounds.length;
+}
+
 function renderFlow() {
   const container = getElement("flow-list");
-  if (!container) {
-    return;
-  }
+  if (!container) return;
   container.replaceChildren();
+  resetLcmClaimed();
 
-  if (!isObject(state.selectedTrace) || !Array.isArray(state.selectedTrace.events)) {
+  if (state.showAllMode && state.allTraces.length > 0) {
+    const mergedGroups = mergeAdjacentTraces(state.allTraces);
+    // Pre-assign LCM entries to merged groups
+    preAssignLcmToMergedGroups(mergedGroups);
+    let roundIdx = 0;
+    for (let g = 0; g < mergedGroups.length; g++) {
+      const group = mergedGroups[g];
+      const count = renderSingleTrace(container, group, roundIdx, g);
+      roundIdx += count;
+    }
+    if (roundIdx === 0) {
     const empty = document.createElement("div");
     empty.className = "panel-empty";
-    empty.textContent = "暂无会话详情。";
+      empty.textContent = "暂无对话数据。";
+    container.appendChild(empty);
+    }
+    return;
+  }
+
+  const trace = state.selectedTrace;
+  if (!isObj(trace) || !Array.isArray(trace.events) || trace.events.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "panel-empty";
+    empty.textContent = state.showAllMode ? "正在加载..." : "暂无对话数据。";
     container.appendChild(empty);
     return;
   }
 
-  const events = mergeFlowTimelineEvents(state.selectedTrace.events);
-  if (events.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "panel-empty";
-    empty.textContent = "该会话没有可展示事件。";
-    container.appendChild(empty);
-    return;
-  }
-
-  for (const event of events) {
-    const item = document.createElement("article");
-    item.className = "flow-item";
-
-    const header = document.createElement("header");
-    header.className = "flow-header";
-
-    const label = document.createElement("span");
-    label.className = "flow-label";
-    label.textContent = formatFlowLabel(event);
-
-    const time = document.createElement("span");
-    time.className = "flow-time";
-    time.textContent = event?.ts_iso || formatTimestamp(event?.ts);
-
-    header.appendChild(label);
-    header.appendChild(time);
-
-    const preview = document.createElement("pre");
-    preview.className = "flow-preview";
-    preview.textContent = typeof event?.content_preview === "string"
-      ? event.content_preview
-      : "(no content)";
-
-    const details = document.createElement("details");
-    details.className = "flow-details";
-    const summary = document.createElement("summary");
-    summary.textContent = "展开查看完整内容";
-    const full = document.createElement("pre");
-    full.className = "flow-full";
-    full.textContent = typeof event?.content_full === "string"
-      ? event.content_full
-      : JSON.stringify(event?.payload_full ?? null, null, 2);
-
-    details.appendChild(summary);
-    details.appendChild(full);
-
-    item.appendChild(header);
-    item.appendChild(preview);
-    item.appendChild(details);
-    container.appendChild(item);
-  }
+  renderSingleTrace(container, trace, 0);
 }
 
 function renderAll() {
@@ -651,32 +1136,36 @@ function renderAll() {
   setText("session-filter-note", state.filterNote);
 }
 
-async function selectTrace(traceId) {
-  state.selectedTraceId = String(traceId);
-  const cacheHit = state.traceCache[state.selectedTraceId];
-  if (cacheHit) {
-    state.selectedTrace = cacheHit;
-    renderAll();
-    return;
+async function refreshLcmDiagnostics() {
+  try {
+    const data = await fetchJson("/api/lcm-diagnostics");
+    state.lcmDiagnostics = Array.isArray(data) ? data : [];
+  } catch {
+    // keep existing
   }
+}
 
-  const token = state.loadingToken + 1;
-  state.loadingToken = token;
+async function selectTrace(traceId) {
+  state.showAllMode = false;
+  state.allTraces = [];
+  const showBtn = getElement("show-all-button");
+  if (showBtn) showBtn.classList.remove("is-active");
+
+  state.selectedTraceId = String(traceId);
+  await refreshLcmDiagnostics();
+  const cached = state.traceCache[state.selectedTraceId];
+  if (cached) { state.selectedTrace = cached; renderAll(); return; }
+  const token = ++state.loadingToken;
   state.selectedTrace = null;
   renderAll();
-
   try {
     const trace = await fetchJson(`/api/trace/${traceId}`);
-    if (token !== state.loadingToken) {
-      return;
-    }
+    if (token !== state.loadingToken) return;
     state.traceCache[state.selectedTraceId] = trace;
     state.selectedTrace = trace;
     setHidden("error-state", true);
-  } catch (_error) {
-    if (token !== state.loadingToken) {
-      return;
-    }
+  } catch (_) {
+    if (token !== state.loadingToken) return;
     state.selectedTrace = null;
     setHidden("error-state", false);
   }
@@ -685,51 +1174,112 @@ async function selectTrace(traceId) {
 
 async function loadTimelineAndSelect() {
   try {
-    const timeline = await fetchJson("/api/timeline");
-    if (!Array.isArray(timeline)) {
-      throw new Error("invalid timeline payload");
-    }
-
+    const [timeline, lcmDiag] = await Promise.all([
+      fetchJson("/api/timeline"),
+      fetchJson("/api/lcm-diagnostics").catch(() => []),
+    ]);
+    if (!Array.isArray(timeline)) throw new Error("bad data");
     state.timeline = timeline;
+    state.lcmDiagnostics = Array.isArray(lcmDiag) ? lcmDiag : [];
     const visible = buildVisibleTimeline(timeline);
     state.visibleTimeline = visible.list;
     state.filterNote = visible.note;
-    setText("last-refresh-time", `最近刷新: ${new Date().toLocaleTimeString()}`);
+    setText("last-refresh-time", `刷新: ${new Date().toLocaleTimeString()}`);
     setHidden("error-state", true);
-
     if (state.visibleTimeline.length === 0) {
-      state.selectedTraceId = null;
-      state.selectedTrace = null;
-      renderAll();
-      return;
+      state.selectedTraceId = null; state.selectedTrace = null; renderAll(); return;
     }
-
-    const stillExists = state.visibleTimeline.some(
-      (item) => String(item.trace_id) === String(state.selectedTraceId),
-    );
-    const nextId = stillExists && state.selectedTraceId !== null
-      ? state.selectedTraceId
-      : state.visibleTimeline[0].trace_id;
+    const still = state.visibleTimeline.some(i => String(i.trace_id) === String(state.selectedTraceId));
+    const nextId = still && state.selectedTraceId !== null ? state.selectedTraceId : state.visibleTimeline[0].trace_id;
     await selectTrace(nextId);
-  } catch (_error) {
-    state.timeline = [];
-    state.visibleTimeline = [];
+  } catch (_) {
+    state.timeline = []; state.visibleTimeline = [];
+    state.selectedTraceId = null; state.selectedTrace = null;
+    state.filterNote = "加载失败。"; setHidden("error-state", false); renderAll();
+  }
+}
+
+async function showAllTraces() {
+  state.showAllMode = true;
     state.selectedTraceId = null;
     state.selectedTrace = null;
-    state.filterNote = "加载失败。";
-    setHidden("error-state", false);
+  await refreshLcmDiagnostics();
+
+  const btn = getElement("show-all-button");
+  if (btn) btn.classList.add("is-active");
+
+  const metaContainer = getElement("session-meta");
+  if (metaContainer) {
+    metaContainer.replaceChildren();
+    const pill = document.createElement("span");
+    pill.className = "meta-pill";
+    pill.textContent = `全量视图: ${state.visibleTimeline.length} 条 trace`;
+    metaContainer.appendChild(pill);
+  }
+
+  const sorted = [...state.visibleTimeline].sort((a, b) => {
+    const tsA = typeof a?.start_ts === "number" ? a.start_ts : 0;
+    const tsB = typeof b?.start_ts === "number" ? b.start_ts : 0;
+    return tsA - tsB;
+  });
+
+  const allTraces = [];
+  let skipped = 0;
+  for (const item of sorted) {
+    const id = String(item.trace_id);
+    let trace;
+    if (state.traceCache[id]) {
+      trace = state.traceCache[id];
+    } else {
+      try {
+        trace = await fetchJson(`/api/trace/${id}`);
+        state.traceCache[id] = trace;
+      } catch {
+        continue;
+      }
+    }
+    if (isLcmInternalTrace(trace)) {
+      skipped++;
+      continue;
+    }
+    allTraces.push(trace);
+  }
+
+  state.allTraces = allTraces;
+  if (skipped > 0) {
+    const pill2 = document.createElement("span");
+    pill2.className = "meta-pill";
+    pill2.textContent = `已过滤 ${skipped} 条 LCM 内部请求`;
+    if (metaContainer) metaContainer.appendChild(pill2);
+  }
+  renderSessionList();
+  renderFlow();
+}
+
+async function exitShowAll() {
+  state.showAllMode = false;
+  state.allTraces = [];
+  const btn = getElement("show-all-button");
+  if (btn) btn.classList.remove("is-active");
+  if (state.visibleTimeline.length > 0) {
+    await selectTrace(state.visibleTimeline[0].trace_id);
+  } else {
     renderAll();
   }
 }
 
-function bindEvents() {
-  const refreshButton = getElement("refresh-button");
-  if (refreshButton) {
-    refreshButton.addEventListener("click", () => {
-      void loadTimelineAndSelect();
-    });
-  }
+const refreshBtn = getElement("refresh-button");
+if (refreshBtn) refreshBtn.addEventListener("click", () => void loadTimelineAndSelect());
+
+const showAllBtn = getElement("show-all-button");
+if (showAllBtn) {
+  showAllBtn.addEventListener("click", () => {
+    if (state.showAllMode) {
+      void exitShowAll();
+    } else {
+      void showAllTraces();
+    }
+  });
 }
 
-bindEvents();
 void loadTimelineAndSelect();
