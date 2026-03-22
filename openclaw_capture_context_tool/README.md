@@ -1,82 +1,90 @@
-# OpenClaw Context-Engine 鍙娴嬪伐鍏?
-瀵?OpenClaw 鐨?context-engine 鎻掍欢锛堝綋鍓嶄负 lossless-claw锛夎繘琛屽叏閾捐矾瑙傛祴锛屽寘鎷?HTTP 娴侀噺鎶撳寘銆丩CM 璇婃柇鍒嗘瀽銆乄eb UI 鍙鍖栥€?
-## 鐩綍缁撴瀯瑕佹眰
+# OpenClaw Context-Engine 可观测工具
+对 OpenClaw 的 context-engine 插件（当前为 lossless-claw）进行全链路观测，包括 HTTP 流量抓包、LCM 诊断分析、Web UI 可视化。
+## 目录结构要求
 
-鏈伐鍏烽渶瑕佸拰 `lossless-claw` 浠撳簱浣滀负鍏勫紵鐩綍鏀剧疆锛?
+本工具需要和 `lossless-claw` 仓库作为兄弟目录放置：
 ```
 parent_dir/
-  ai_toolbox/                    <- 鏈粨搴?    openclaw_capture_context_tool/
+  ai_toolbox/                    <- 本仓库
+    openclaw_capture_context_tool/
       deploy_test_env.sh
       openclaw_capture_toolkit.sh
-      浣跨敤鎸囧崡.md
+      使用指南.md
       ...
-  lossless-claw/                 <- lossless-claw 浠撳簱
+  lossless-claw/                 <- lossless-claw 仓库
     src/
     package.json
     ...
 ```
 
-## 鍓嶇疆鏉′欢
+## 前置条件
 
-| 渚濊禆 | 鐗堟湰 | 璇存槑 |
+| 依赖 | 版本 | 说明 |
 |------|------|------|
-| Linux/WSL2 | - | 涓嶆敮鎸?Windows 鍘熺敓 |
-| Node.js | 18+ | OpenClaw 杩愯鏃?|
+| Linux/WSL2 | - | 不支持 Windows 原生 |
+| Node.js | 18+ | OpenClaw 运行时 |
 | Python | 3.10+ | Capture API |
-| OpenClaw | 宸插畨瑁?| openclaw configure 宸插畬鎴?|
-| 妯″瀷 API Key | 宸查厤缃?| 鍦?OpenClaw 涓厤缃ソ provider 鍑嵁 |
+| OpenClaw | 已安装 | openclaw configure 已完成 |
+| 模型 API Key | 已配置 | 在 OpenClaw 中配置好 provider 凭据 |
 
-## 蹇€熷紑濮?
-### 鏂瑰紡涓€锛氶殧绂绘祴璇曢儴缃诧紙鎺ㄨ崘鏂扮敤鎴凤級
+## 快速开始
+### 方式一：隔离测试部署（推荐新用户）
 
 ```bash
-# 1. 鍏嬮殕涓や釜浠撳簱鍒板悓涓€鐖剁洰褰?mkdir my-openclaw-tools && cd my-openclaw-tools
+# 1. 克隆两个仓库到同一父目录
+mkdir my-openclaw-tools && cd my-openclaw-tools
 git clone <ai_toolbox_repo> ai_toolbox
 git clone <lossless-claw_repo> lossless-claw
 
-# 2. 涓€閿儴缃叉祴璇曠幆澧?cd ai_toolbox/openclaw_capture_context_tool
+# 2. 一键部署测试环境
+cd ai_toolbox/openclaw_capture_context_tool
 bash deploy_test_env.sh
 
-# 3. 鎸夎緭鍑烘彁绀哄惎鍔紙涓や釜缁堢锛?# 缁堢1: cd ~/openclaw-test-deploy/ai_toolbox && ./openclaw_capture_toolkit.sh start
-# 缁堢2:
+# 3. 按输出提示启动（两个终端）
+# 终端1:
+cd ~/openclaw-test-deploy/ai_toolbox && ./openclaw_capture_toolkit.sh start
+# 终端2:
 LCM_DIAGNOSTICS_PATH=~/.openclaw-test/lcm-diagnostics.jsonl \
 HTTP_PROXY=http://127.0.0.1:28080 \
 HTTPS_PROXY=http://127.0.0.1:28080 \
 NODE_TLS_REJECT_UNAUTHORIZED=0 \
 openclaw --profile test gateway run --port 28789
 
-# 4. 鍙戦€佹祴璇曡姹?LCM_DIAGNOSTICS_PATH=~/.openclaw-test/lcm-diagnostics.jsonl \
+# 4. 发送测试请求
+LCM_DIAGNOSTICS_PATH=~/.openclaw-test/lcm-diagnostics.jsonl \
 HTTP_PROXY=http://127.0.0.1:28080 \
 HTTPS_PROXY=http://127.0.0.1:28080 \
 NODE_TLS_REJECT_UNAUTHORIZED=0 \
 openclaw --profile test agent -m "hello" --session-id "test"
 
-# 5. 鎵撳紑 Web UI: http://127.0.0.1:9001/
+# 5. 打开 Web UI: http://127.0.0.1:9001/
 ```
 
-deploy_test_env.sh 鑷姩澶勭悊: npm install銆丳ython venv銆?env 鐢熸垚銆乸rofile 鍒涘缓銆乸lugin 閰嶇疆銆乤uth 澶嶅埗銆?
-### 鏂瑰紡浜岋細鐩存帴浣跨敤锛堝凡鏈夌幆澧冿級
+deploy_test_env.sh 自动处理: npm install、Python venv、.env 生成、profile 创建、plugin 配置、auth 复制。
+### 方式二：直接使用（已有环境）
 
 ```bash
 cd ai_toolbox/openclaw_capture_context_tool
-./openclaw_capture_toolkit.sh setup    # 妫€娴嬬幆澧冦€佸畨瑁呬緷璧?cp env.example .env                    # 缂栬緫閰嶇疆
-./openclaw_capture_toolkit.sh up       # 鍚姩鍏ㄦ爤
+./openclaw_capture_toolkit.sh setup    # 检测环境、安装依赖
+cp env.example .env                    # 编辑配置
+./openclaw_capture_toolkit.sh up       # 启动全栈
 ```
 
-## 涓昏鍔熻兘
+## 主要功能
 
-- **Web UI**锛氬璇濊建杩规椂闂寸嚎 + LCM 璇婃柇闈㈡澘 + Assemble 涓婁笅鏂囩粍瑁呭彲瑙嗗寲
-- **鍛戒护琛岃瘖鏂?*锛歚./openclaw_capture_toolkit.sh diag --round 2 --stage compaction_evaluate`
-- **API 杩囨护**锛歚/api/lcm-diagnostics?session_id=X&stage=Y&after_ts=Z`
-- **娴嬭瘯鏁版嵁澶嶇幇**锛歚test-fixtures/` 鍖呭惈鍙噸鏀剧殑璇婃柇鏁版嵁
+- **Web UI**：会话轨迹时间线 + LCM 诊断面板 + Assemble 上下文组装可视化
+- **命令行诊断**：`./openclaw_capture_toolkit.sh diag --round 2 --stage compaction_evaluate`
+- **API 过滤**：`/api/lcm-diagnostics?session_id=X&stage=Y&after_ts=Z`
+- **测试数据复现**：`test-fixtures/` 包含可重放的诊断数据
 
-## lossless-claw 鏂板鐜鍙橀噺
+## lossless-claw 新增环境变量
 
-| 鍙橀噺 | 榛樿 | 璇存槑 |
+| 变量 | 默认 | 说明 |
 |------|------|------|
-| LCM_DIAGNOSTICS_ENABLED | true | 璁句负 false 鍏抽棴璇婃柇鍐欏叆 |
-| LCM_DIAGNOSTICS_PATH | ~/.openclaw/lcm-diagnostics.jsonl | 鑷畾涔夎瘖鏂枃浠惰矾寰?|
+| LCM_DIAGNOSTICS_ENABLED | true | 设为 false 关闭诊断写入 |
+| LCM_DIAGNOSTICS_PATH | ~/.openclaw/lcm-diagnostics.jsonl | 自定义诊断文件路径 |
 
-## 璇︾粏鏂囨。
+## 详细文档
 
-- [浣跨敤鎸囧崡.md](浣跨敤鎸囧崡.md) - 瀹屾暣鍔熻兘璇存槑銆丩CM 闃舵閫熸煡琛ㄣ€佺幆澧冨彉閲忓弬鑰冦€佹晠闅滄帓闄?- [test-fixtures/README.md](test-fixtures/README.md) - 娴嬭瘯鏁版嵁璇存槑鍜屽鐜版楠?
+- [使用指南.md](使用指南.md) - 完整功能说明、LCM 阶段速查表、环境变量参考、故障排除
+- [test-fixtures/README.md](test-fixtures/README.md) - 测试数据说明和复现步骤
