@@ -798,6 +798,39 @@ function renderAssembleCard(assembleEntries) {
   const contextEntry = assembleEntries.find(e => e.stage === "context_assemble");
   const outputEntry = assembleEntries.find(e => e.stage === "assemble_output");
 
+  const aiD = inputEntry?.data || {};
+  const caD = contextEntry?.data || {};
+  const aoD = outputEntry?.data || {};
+  const budget = aiD.tokenBudget || caD.tokenBudget || 0;
+  const inputTok = aiD.inputTokenEstimate || 0;
+  const outputTok = aoD.estimatedTokens || caD.estimatedTokens || 0;
+  const saved = aoD.tokensSaved || 0;
+  const savePct = aoD.savingPct || 0;
+  const rawCount = caD.rawMessageCount || 0;
+  const sumCount = caD.summaryCount || 0;
+  const budgetPct = budget > 0 ? ((outputTok / budget) * 100).toFixed(1) : "?";
+  const sumPanel = document.createElement("div");
+  sumPanel.className = "lcm-assemble-summary";
+  const summaryKvs = [
+    ["tokenBudget", fmt(budget)],
+    ["\u8f93\u5165 tokens", fmt(inputTok) + " (\u542b\u6d88\u606f\u7ed3\u6784\u6807\u8bb0)"],
+    ["\u7ec4\u88c5\u540e tokens", fmt(outputTok) + " (\u5360\u9884\u7b97 " + budgetPct + "%)"],
+  ];
+  if (saved > 0) summaryKvs.push(["\u8282\u7701", fmt(saved) + " tokens (-" + savePct + "%)"]);
+  summaryKvs.push(["\u6d88\u606f\u7ec4\u6210", rawCount + " \u539f\u6587 + " + sumCount + " \u6458\u8981"]);
+  for (const [k, v] of summaryKvs) {
+    const row = document.createElement("div");
+    row.className = "lcm-kv";
+    const rl = document.createElement("span"); rl.className = "lcm-kv-label"; rl.textContent = k;
+    const rv = document.createElement("span"); rv.className = "lcm-kv-value" + (k.includes("\u8282\u7701") ? " lcm-saving" : ""); rv.textContent = v;
+    row.appendChild(rl); row.appendChild(rv); sumPanel.appendChild(row);
+  }
+  const note = document.createElement("div");
+  note.className = "lcm-assemble-note";
+  note.textContent = "\u2139 \u8f93\u5165 tokens \u542b API \u6d88\u606f\u7ed3\u6784\u6807\u8bb0(role/separator)\uff0c\u7ec4\u88c5\u540e\u4e3a engine tokenizer \u5b9e\u9645\u8ba1\u6570\uff0c\u6d88\u606f\u5217\u8868\u4e2d\u7684 tok \u4e3a text.length/4 \u7c97\u4f30";
+  sumPanel.appendChild(note);
+  body.appendChild(sumPanel);
+
   if (inputEntry) {
     const d = inputEntry.data || {};
     const section = document.createElement("details");
